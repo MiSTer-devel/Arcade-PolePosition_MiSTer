@@ -1,5 +1,5 @@
 <misterromdescription>
-    <name>Pole Position II (bootleg)</name>
+    <name>Pole Position II (Bootleg)</name>
     <region>World</region>
     <homebrew>no</homebrew>
     <bootleg>yes</bootleg>
@@ -128,6 +128,6 @@
         <dip name="Game Time"     bits="15,15" ids="120 secs,90 secs"/>
     </switches>
 
-    <remark>Pole Position II (bootleg)</remark>
+    <remark>Pole Position II (Bootleg)</remark>
     <mratimestamp>20260921000000</mratimestamp>
 </misterromdescription>
