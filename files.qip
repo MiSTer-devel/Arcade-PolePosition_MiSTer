@@ -40,7 +40,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/pp_tile_layer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/pp_video_composite.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/sp_palette_msb.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/sp_palette_lsb.sv
-set_global_assignment -name VHDL_FILE          rtl/poleposition.vhd
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/poleposition.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/PolePosition_CPU.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/PolePosition_subcpu.sv
 set_global_assignment -name SYSTEMVERILOG_FILE "Arcade-PolePosition.sv"
