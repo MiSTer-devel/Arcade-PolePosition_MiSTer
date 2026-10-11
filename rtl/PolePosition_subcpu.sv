@@ -1,68 +1,15 @@
 //============================================================================
-//  PolePosition_subcpu.sv — two Z8002 game CPUs + shared video RAM
+//  PolePosition_subcpu.sv -- the two Z8002 game CPUs + shared video RAM.
+//  Based on MAME polepos.cpp (z8002_map / z8002_map_1/2) and polepos_v.cpp (Z80 byte-lane handlers).
 //
-//  Ground truth: MAME polepos.cpp (z8002_map / z8002_map_1/2) + polepos_v.cpp
-//  (sprite_r/w, road_r/w, alpha_r/w, view_r/w — Z80 byte-lane handlers).
-//
-//  Z80 BYTE LANE (verified in polepos_v.cpp): sprite_r/w, road_r/w, alpha_r/w,
-//  view_r/w ALL read/write ONLY THE LOW BYTE of the 16-bit word:
-//      sprite_r: return mem[offset] & 0xff;
-//      sprite_w: mem[offset] = (mem[offset] & 0xff00) | data;
-//  identical pattern for road/alpha/view. So every Z80 access is a low-byte
-//  R/W of the same word the Z8002s see; high byte is untouched by the Z80.
-//
-//  Buffer map (Z8002 word addr | Z80 byte offset from 0x4000 | depth):
-//    sprite  0x8000-0x8FFF | 0x000-0x7FF | 0x800 words (11-bit index)
-//    road    0x9000-0x97FF | 0x800-0xBFF | 0x400 words (10-bit index)
-//    alpha   0x9800-0x9FFF | 0xC00-0xFFF | 0x400 words (10-bit index)
-//    view    0xA000-0xAFFF | 0x1000-0x17FF | 0x800 words (11-bit index)
-//  Z80 relative offset == word index numerically for all four buffers (1:1),
-//  so both CPU sides decode to the SAME index space per buffer.
-//
-//  Sub program ROM: 0x0000-0x7FFF Z8002 space, but only 8K words (13-bit
-//  addr[13:1], addr[14] mirrored/unused) are physically loaded — confirmed by
-//  pp_sub1.bin/pp_sub2.bin = 16384 bytes = 8192 words each, and sub1's parked
-//  wait-loop PC (0x34C0, per spec) sits inside that 8K-word range.
-//
-//  ARBITRATION: shared VRAM buffers have one word-wide read-only "port B"
-//  (scanout, for the future video pipeline) plus three independent write
-//  ports (Z80 byte / sub1 word / sub2 word), one per writer, each its own
-//  always block (see DIAG-REVERT-2026-07-12 below). Implemented behaviorally:
-//  each buffer is a hi/lo BYTE-array pair (avoids any array-element
-//  bit-select), with a REGISTERED (synchronous, 1-clock) read per consumer --
-//  see the `*_qa`/`*_qb` NBA reads below. [Corrected 2026-08-05: this line
-//  previously said "continuous combinational reads", which the code has never
-//  done. Quartus infers these as altsyncram, matching the registered reads.]
-//  An earlier
-//  revision chained the three writers behind ONE priority-arbitrated
-//  (Z80 > sub1 > sub2) always block, which silently DROPPED a lower-priority
-//  writer's data whenever a higher-priority writer also wrote to that same
-//  buffer (any index) in the same clock -- this broke sub2's VRAM
-//  write/read-back self-test (0x287E/0x2880 in pp_sub2.asm) whenever sub1 ran
-//  concurrently, even though sub2's own ROM checksum was unaffected. Splitting
-//  into independent per-writer blocks matches real dual-port VRAM behavior for
-//  non-conflicting addresses; only a genuine same-cycle+same-index write from
-//  two masters remains a race, same as it would be in real hardware. Z8002 bus
-//  signals are held stable by the core across its whole inter-ce window (~16
-//  clk slack per the "present addr, din valid by next ce" contract in
-//  z8002.sv), so repeated same-cycle re-service is idempotent and there is no
-//  dependence on exact clock-edge alignment between the externally-supplied
-//  Z80 `cen` and this module's internally generated sub1/sub2 CEs.
-//
-//  #deviation: Z8002-side buffer/register accesses are treated as WORD-ONLY
-//  (wordacc/addr[0] byte lane not modeled on the Z8002 side — only the Z80
-//  side is genuinely byte-oriented per polepos_v.cpp). The core's `wordacc`
-//  output is left unconnected. Flagged for follow-up if a sub ROM is found
-//  to do a byte-wide (ADDB/INCB) access into VRAM.
-//
-//  NVI: nvi_latch_subN is armed at each sub_nvi_trig pulse (from that CPU's
-//  nvi_enable at that instant) and cleared when that CPU writes 0 to 0x6000,
-//  per polepos.cpp:319. That write is the only ack the hardware has -- z8002.sv
-//  re-latches nvi_pending from the nvi_n LEVEL every clock, so a line left
-//  asserted is re-accepted on the next IRET, not "accepted exactly once".
-//
-//  0x6000/0xC000/0xC100 mirror-mask decodes derived from the given MAME
-//  AM_MIRROR masks (0x1FFE, 0x38FE): significant-bit mask = ~mirror_mask.
+//  Buffer map (Z8002 word addr | Z80 byte offset from 0x4000 | depth); the Z80 reads/writes the LOW byte only:
+//    sprite  0x8000-0x8FFF | 0x000-0x7FF   | 0x800 words
+//    road    0x9000-0x97FF | 0x800-0xBFF   | 0x400 words
+//    alpha   0x9800-0x9FFF | 0xC00-0xFFF   | 0x400 words
+//    view    0xA000-0xAFFF | 0x1000-0x17FF | 0x800 words
+//  Each buffer: Port A = time-division CPU side (Z80 / sub1 / sub2, independent writers), Port B = scanout.
+//  Z8002-side buffer accesses are word-only (byte lane not modelled).
+//  NVI: armed at each vblank pulse, cleared when that CPU writes 0 to 0x6000 (polepos.cpp).
 //============================================================================
 `default_nettype none
 
@@ -98,15 +45,12 @@ module PolePosition_subcpu
     output wire [15:0] vscroll,
 
     // ---- ROM ioctl load: index-0 stream, sub1@0x3000(0x8000) sub2@0xB000(0x8000)
-    //      pre-gated to index==0 by the caller (matches PolePosition_CPU.sv's
-    //      rom_wr convention). Interleaved 16-bit big-endian: even dn_addr=HIGH.
+    //      interleaved big-endian: even dn_addr = HIGH byte
     input  wire [24:0] dn_addr,
     input  wire  [7:0] dn_data,
     input  wire        dn_wr,
 
-    // PP2: enables the IC25 protection custom as a READ overlay on sub1
-    // 0x4000-0x5FFF. Set ONLY for machine polepos2 (polepos2/polepos2a).
-    // polepos2b is machine=polepos and has real ROM there -- keep it 0.
+    // PP2 IC25 protection custom: read overlay on sub1 0x4000-0x5FFF (machine polepos2 only)
     input  wire        ic25_en,
 
     // ---- debug ----------------------------------------------------------
@@ -121,16 +65,15 @@ module PolePosition_subcpu
 );
 
     //------------------------------------------------------------------------
-    //  Shared CE divider — cen_z80(implicit, external)=phase0, sub1=phase5,
-    //  sub2=phase10, all /16 of CLK_49M = 3.072 MHz, non-overlapping.
+    //  CE divider: Z80 = phase 0 (external), sub1 = phase 5, sub2 = phase 10, all /16 = 3.072 MHz
     //------------------------------------------------------------------------
     reg [3:0] div;
     always @(posedge clk) begin
         if (reset) div <= 4'd0;
         else       div <= div + 4'd1;
     end
-    wire cen_sub1 = (div == 4'd5)  & ~pause;   // PAUSE-GATE-2026-08-05
-    wire cen_sub2 = (div == 4'd10) & ~pause;   // PAUSE-GATE-2026-08-05
+    wire cen_sub1 = (div == 4'd5)  & ~pause;  // freeze both Z8002s
+    wire cen_sub2 = (div == 4'd10) & ~pause;
 
     //------------------------------------------------------------------------
     //  Z8002 instances
@@ -237,7 +180,6 @@ module PolePosition_subcpu
     wire [10:0] z80_idx11 = vram_addr[10:0];
     wire [9:0]  z80_idx10 = vram_addr[9:0];
 
-
     //------------------------------------------------------------------------
     //  Port-A time-division owner (matches cen_sub1=div5 / cen_sub2=div10).
     //------------------------------------------------------------------------
@@ -246,12 +188,7 @@ module PolePosition_subcpu
     wire own_sub2 = (div >= 4'd10);
 
     //------------------------------------------------------------------------
-    //  Sub program ROMs — 16K words each, hi/lo byte-split SIMPLE-dual-port
-    //  BRAM: write port = index-0 ioctl byte stream (sub1@0x3000/sub2@0xB000,
-    //  even dn_addr=HIGH byte, big-endian); read port = the owning z8002
-    //  (REGISTERED). Dedicated per sub (rom1<->sub1, rom2<->sub2), so no slot
-    //  mux is needed — the read is valid at the sub's CE (addr stable the whole
-    //  window). SDP template: `if(we) mem[waddr]<=wd; q<=mem[raddr];`.
+    //  Sub program ROMs: 16K words each, hi/lo byte-split simple dual-port BRAM (ioctl write, Z8002 read)
     //------------------------------------------------------------------------
     reg [7:0] rom1_hi [0:16383];
     reg [7:0] rom1_lo [0:16383];
@@ -303,11 +240,7 @@ module PolePosition_subcpu
     reg [7:0] view_hi   [0:2047];
     reg [7:0] view_lo   [0:2047];
 
-    // Memory zero-init is SIM-ONLY: Verilator has no loop cap, but Quartus
-    // rejects the 8192-iteration loop (Error 10106, 5000-iter synth limit). On
-    // Cyclone V the inferred BRAM config-inits to 0 anyway, and the sub ROMs are
-    // ioctl-loaded (reset held during download) before the Z8002s run — so no
-    // explicit init is needed for HW. Guard with VERILATOR (auto-defined by it).
+    // zero-init is sim-only (Quartus loop limit); BRAM inits to 0 and the ROMs are loaded before the CPUs run
     integer i;
 `ifdef VERILATOR
     initial begin
@@ -328,11 +261,7 @@ module PolePosition_subcpu
 
     //------------------------------------------------------------------------
     //  Shared Port-A (CPU-side) controls — selected by the current `div` slot
-    //  owner. Address widths: sprite/view = 11-bit, road/alpha = 10-bit. The
-    //  Z80 writes the LOW byte only (polepos_v.cpp byte lane) => it drives the
-    //  lo-array write-enable but never the hi array; the z8002s write the full
-    //  word. Writes are idempotent across the owner's whole slot (bus held
-    //  stable), so no edge alignment is assumed.
+    //  The Z80 writes the low byte only; the Z8002s write whole words.
     //------------------------------------------------------------------------
     wire [10:0] pa_addr11 = own_z80 ? z80_idx11 : own_sub1 ? sub1_idx11 : sub2_idx11;
     wire  [9:0] pa_addr10 = own_z80 ? z80_idx10 : own_sub1 ? sub1_idx10 : sub2_idx10;
@@ -385,46 +314,6 @@ module PolePosition_subcpu
     end
     assign scan_road_dout = {road_hi_qb, road_lo_qb};
 
-/* DIAG-REVERT-2026-08-10: REVERTED 2026-08-10 (original restored above).
-   Kept commented for re-use -- it forces a known-good straight road and is the
-   fastest way to re-split "renderer vs CPU data" if the road misbehaves again.
-   Its result WAS the decisive clue: with xoffs pinned constant the picture lost
-   ALL vertical variation (uniform stripes), which proved the road ROM planes
-   were misaligned -- fixed by GFX-LOAD-OFFSET-FIX-2026-08-10 in
-   Arcade-PolePosition.sv.
-   To re-enable: comment out the assign above and uncomment this block.
-   -----------------------------------------------------------------------
-    // DIAG: force the road generator's steering data to a known-good straight
-    // road, bypassing whatever the sub-CPUs wrote. Splits the garbled-road bug
-    // in ONE hardware build:
-    //   * road draws clean  => pp_road_gen + road ROM + road palette are all
-    //     GOOD on real silicon, and the garbage is 100% the sub-CPU writes into
-    //     road16_memory. Stop looking at the renderer.
-    //   * road still garbled => the fault is in the HW-only part of the path
-    //     (scan_road addressing, palette, composite) -- something the Verilator
-    //     road rig does not cover.
-    // Basis: pp_road_gen is bit-exact vs MAME draw_road() on the REAL road ROM
-    // (32,768 px, 0 mismatches, verilator/road `make view`), so the renderer is
-    // already exonerated in sim -- this confirms it on hardware.
-    //
-    // road16_memory layout (MAME draw_road):
-    //   0x000-0x1FF : yoffs -> roadpal in bits [3:0]
-    //   0x380+y     : per-scanline X offset, & 0x3FF. Bit 0x200 set = blank
-    //                 line, so a road only draws for values < 0x200.
-    // A CONSTANT offset = a perfectly straight road; the ROM rows supply the
-    // perspective. Tweak DIAG_ROAD_XOFFS if the road sits off-centre.
-    // VALIDATED 2026-08-10 by verilator/road `make view`: these exact two values
-    // render a correct road (green grass, grey surface, red/white rumble stripes
-    // converging to a vanishing point) identical to the MAME draw_road oracle.
-    // roadpal 0 was the FIRST guess and is wrong -- it is a flat bank. Bank 1 has
-    // 6 distinct colours and is the road bank.
-    localparam [15:0] DIAG_ROAD_XOFFS = 16'h0100;
-    localparam [15:0] DIAG_ROAD_PAL   = 16'h0001;
-    assign scan_road_dout = (scan_road_addr >= 10'h380) ? DIAG_ROAD_XOFFS
-                          : (scan_road_addr <  10'h200) ? DIAG_ROAD_PAL
-                          : 16'h0000;
-   ----------------------------------------------------------------------- */
-
     // ---- alpha (0x400 words, 10-bit) ----
     always @(posedge clk) begin
         if (we_alpha_lo) alpha_lo[pa_addr10] <= pa_wdlo;
@@ -456,15 +345,8 @@ module PolePosition_subcpu
     assign scan_view_dout = {view_hi_qb, view_lo_qb};
 
     //------------------------------------------------------------------------
-    //  Per-master Port-A read HOLDs. `_qa` at capture time reflects the addr
-    //  driven onto Port-A on the PREVIOUS clk (registered read), i.e. the slot
-    //  owner just before the boundary. Capture each master's read as its slot
-    //  ends; the hold is then stable through that master's next CE:
-    //    z80  slot 0..4  -> capture div==5  (qa = z80 read from div4)
-    //    sub1 slot 5..9  -> capture div==10 (qa = sub1 read from div9); CE div5
-    //    sub2 slot 10..15-> capture div==0  (qa = sub2 read from div15); CE div10
-    //  Buffer select uses the master's decode (stable across its window), so it
-    //  agrees with the rom/vram select used when din is consumed at the CE.
+    //  Per-master Port-A read holds, captured as each master's slot ends:
+    //    z80 slot 0..4 -> div 5, sub1 slot 5..9 -> div 10, sub2 slot 10..15 -> div 0
     //------------------------------------------------------------------------
     wire [15:0] sub1_vram_qa = sub1_v_sprite ? {sprite_hi_qa, sprite_lo_qa}
                              : sub1_v_road   ? {road_hi_qa,   road_lo_qa}
@@ -517,28 +399,18 @@ module PolePosition_subcpu
     assign vscroll = vscroll_r;
 
     //------------------------------------------------------------------------
-    //  NVI line: armed at each sub_nvi_trig pulse (gated by that CPU's
-    //  nvi_enable at that instant), and de-asserted when that CPU writes 0 to
-    //  its own nvi_enable -- polepos.cpp:319 set_input_line(NVI_LINE, CLEAR).
-    //  That write is the only interrupt acknowledge the hardware has: each sub's
-    //  whole game loop IS its NVI handler (pp_sub1.asm $0132 clears 0x6000 on
-    //  entry, $01CC sets it again just before the IRET at $01D2).
-    //------------------------------------------------------------------------
-    // NVI-ACK-ON-DISABLE-2026-09-05: without the third branch in each block,
-    // nvi_n stayed low for the whole frame; z8002.sv re-latches nvi_pending from
-    // the LEVEL (z8002.sv:1250), so every IRET immediately re-entered the handler
-    // and each sub ran its per-frame work several times per frame.
-    // TO REVERT: delete the two marked branches below.
+    //  NVI line: armed at each sub_nvi_trig (gated by that CPU's nvi_enable), cleared when that CPU
+    //  writes 0 to 0x6000 -- the hardware's only acknowledge (polepos.cpp set_input_line(NVI_LINE, CLEAR)).
     reg nvi_latch_sub1, nvi_latch_sub2;
     always @(posedge clk) begin
         if (reset | ~sub1_reset_n)                           nvi_latch_sub1 <= 1'b0;
         else if (sub_nvi_trig)                               nvi_latch_sub1 <= nvi_en_sub1;
-        else if (sub1_mem_we & sub1_nvi_hit & ~sub1_dout[0]) nvi_latch_sub1 <= 1'b0;   // NVI-ACK-ON-DISABLE-2026-09-05
+        else if (sub1_mem_we & sub1_nvi_hit & ~sub1_dout[0]) nvi_latch_sub1 <= 1'b0;
     end
     always @(posedge clk) begin
         if (reset | ~sub2_reset_n)                           nvi_latch_sub2 <= 1'b0;
         else if (sub_nvi_trig)                               nvi_latch_sub2 <= nvi_en_sub2;
-        else if (sub2_mem_we & sub2_nvi_hit & ~sub2_dout[0]) nvi_latch_sub2 <= 1'b0;   // NVI-ACK-ON-DISABLE-2026-09-05
+        else if (sub2_mem_we & sub2_nvi_hit & ~sub2_dout[0]) nvi_latch_sub2 <= 1'b0;
     end
     assign sub1_nvi_n = ~nvi_latch_sub1;
     assign sub2_nvi_n = ~nvi_latch_sub2;
@@ -548,13 +420,7 @@ module PolePosition_subcpu
     assign dbg2_nvi_en = nvi_en_sub2;
 
     //------------------------------------------------------------------------
-    //  Sub CPU / Z80 read-data muxes. VRAM data comes from the per-master
-    //  Port-A read HOLD (registered one CE-period earlier == the z8002 memory
-    //  contract). The rom/vram select uses the CURRENT addr, which still points
-    //  at the same window's access being consumed this CE. ROM read is a direct
-    //  registered fetch (dedicated Port-B, no slot). Unmapped => hold defaults
-    //  (16'hFFFF / 8'hFF) preserved inside the *_vram_qa muxes above.
-    //------------------------------------------------------------------------
+    //  Sub CPU / Z80 read-data muxes (VRAM via the Port-A holds, ROM direct)
     // IC25 (PP2 only) shadows the ROM for reads of sub1 0x4000-0x5FFF.
     wire        sub1_ic25_sel = ic25_en & (sub1_addr[15:13] == 3'b010) & ~sub1_we;
     wire [15:0] sub1_ic25_rd;

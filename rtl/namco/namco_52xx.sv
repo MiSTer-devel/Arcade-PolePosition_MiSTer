@@ -1,33 +1,9 @@
 //============================================================================
-//  namco_52xx.sv — Namco 52xx sample-player MCU wrapper (voice/sample sound)
-//
-//  Ground truth: Useful Stuff/mame/namco52.cpp (namco_52xx_device) +
-//  Useful Stuff/mame/polepos.cpp machine_config (:895-899, :920-921, :937-938).
-//  MB8843 4-bit MCU (rtl/cpu/mb88_sv/mb88.sv) + its 0x400 internal mask ROM
-//  (ioctl index 6, offset 0xC00-0xFFF, 52xx.bin crc 3257d11e -- sourced
-//  2026-07-28, was blocked before that) + the external 0x8000 sample
-//  ("voice") ROM (ioctl index 5, region-relative 0x4000-0xBFFF, wired via
-//  poleposition.vhd's sample52_addr/sample52_data ports).
-//
-//  polepos machine_config port wiring (namco52.cpp):
-//    K3:0     = command[3:0]        (K_r() = m_latched_cmd & 0x0f)
-//    SI       = constant 1          (namco_52xx_si_r(): "pulled to +5V")
-//    R0(in)   = sampleROM[addr][3:0]  R1(in) = sampleROM[addr][7:4]
-//    R2(out)  = addr[3:0]   R3(out) = addr[7:4]   O(out) = addr[15:8]
-//               (namco52.cpp R2_w/R3_w/O_w; full 16-bit addr, but the mapped
-//               sample region is exactly 0x8000 bytes -- MAME bounds-checks
-//               `offset < length` and returns 0xff past it; addr[15] set is
-//               exactly "past 0x8000" here, so that bit alone gates it)
-//    P(out)   = discrete circuit input NAMCO_52XX_P_DATA -- NOT wired to real
-//               audio synthesis yet, same TODO status as namco_54xx.sv/
-//               PolePosition_CPU.sv's engine_* ports.
-//    reset    = LS259 q1 (namco_reset, shared with 51/53/54xx)
-//    chip_sel = 06xx chipsel[2] -> IRQ
-//  Like 54xx: namco52.cpp has NO read() method and polepos.cpp binds no
-//  read_callback<2> -- the Z80 never reads this chip back through 06xx, so
-//  (a) no data_out port here, existing chip23_din=0xFF stub already matches
-//  MAME's unbound-callback default; (b) command latch is a simple one-way
-//  write, no shared-mailbox dance (unlike 51xx's O-port/Z80-write register).
+//  namco_52xx.sv -- Namco 52xx sample-player MCU: MB8843 + 1 KB mask ROM (ioctl index 6, 0xC00)
+//  + the external 0x8000-byte voice ROM (ioctl index 5 +0x4000).
+//  Based on MAME src/mame/namco/namco52.cpp and polepos.cpp.
+//    K = command[3:0], SI = 1, R0/R1 = voice ROM nibbles in, R2/R3/O = voice ROM address out,
+//    P = 4-bit sample out (pp_voice52_snd). Write-only over the 06xx (no read callback).
 //============================================================================
 `default_nettype none
 
@@ -42,8 +18,7 @@ module namco_52xx
     input  wire        wr_en,      // 06xx chip_wr[2] strobe (data_w broadcast, write-mode+selected)
     input  wire  [7:0] wr_data,
 
-    // ---- discrete circuit input (namco52.cpp P_w) -- UNCONNECTED downstream,
-    //      no analog filter network modeled yet ------------------------------
+    // ---- sample output (namco52.cpp P_w) ----
     output wire  [3:0] discrete_p,    // P0-P3 -> NAMCO_52XX_P_DATA
 
     // ---- external sample ("voice") ROM, 0x8000 bytes, 1-clk sync read ------

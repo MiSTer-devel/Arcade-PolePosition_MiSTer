@@ -1,23 +1,8 @@
 //============================================================================
-//  PolePosition_CPU.sv — Pole Position CPU subsystem
-//    Z80 maincpu (this file today) + [NEXT] two Z8002 game CPUs + shared video RAM.
-//    Replaces Xevious poleposition.vhd's 3-Z80 muxed-bus CPU section, presenting the
-//    same downstream video-RAM read interface the Xevious video pipeline consumes.
-//
-//  Ground truth: MAME polepos.cpp  z80_map / z80_io / machine_config (LS259 @8E).
-//  Fabric clock = 49.152 MHz (CLK_49M, from the Vastar PLL); EXACT CE divides:
-//    Z80 + both Z8002 = /16 = 3.072 MHz · pixel = /8 = 6.144 · Namco 5xxx = /32 = 1.536.
-//
-//  ROLE — the Z80 is MASTER of the 3-CPU board: boots, self-tests, programs the LS259
-//  latch, then RELEASES the two Z8002 game CPUs (q4/q5) and the Namco 5xxx (q1). All
-//  three then talk through the shared video RAM (Z80 byte @0x4000-0x57FF; the Z8002s
-//  word @0x8000-0xAFFF — the SAME physical buffers).
-//
-//  DONE (folded from pp_maincpu.sv): Z80 (T80s) + prog ROM (ioctl) + NVRAM + sound RAM
-//  + LS259 latch + IRQ/READY; exposes the video-RAM byte port, 06xx bus, WSG, engine, ADC.
-//  NEXT (this phase): add the two Z8002 instances + sub ROMs + the shared video RAM
-//  (word/byte dual-width, arbitrated) + NVI@vblank + the 0x6000 nvi-enable latch.
-//  #unverified — validates only IN-SYSTEM (T80 is VHDL, no standalone Verilator).
+//  PolePosition_CPU.sv -- Pole Position CPU board: Z80 main CPU, LS259 latch, IRQ/READY,
+//  program ROM, NVRAM, sound RAM, peripheral ports, and the two Z8002 game CPUs (PolePosition_subcpu).
+//  Based on MAME polepos.cpp (z80_map / z80_io / machine config).
+//  49.152 MHz fabric clock: Z80 + Z8002s at /16 = 3.072 MHz, pixel /8, Namco customs /32.
 //============================================================================
 `default_nettype none
 
@@ -34,35 +19,27 @@ module PolePosition_CPU
     // ---- LS259 control-latch outputs (MAME polepos.cpp:931-943) ----------------
     output wire        sub1_reset_n,  // q4  0 = Z8002 #1 held in reset (MAME .invert())
     output wire        sub2_reset_n,  // q5  0 = Z8002 #2 held in reset (MAME .invert())
-    output wire        namco_reset,   // q1  Namco 51/52/53/54xx reset  (polarity #unverified vs namco51.cpp)
+    output wire        namco_reset,  // q1  Namco 51/52/53/54xx reset
     output wire        sound_en,      // q2  WSG sound_enable + engine clson
     output wire        gasel,         // q3  ADC channel select: 0=BRAKE, 1=ACCEL
-                                       // (verified: MAME polepos.h m_analog_io{"BRAKE","ACCEL"}
-                                       // indexed by gasel via analog_r()/gasel_w())
     output wire        sb0,           // q6  auto_start_mask = !q6 in MAME
     output wire        chacl,         // q7  (chacl_w — unmodelled)
     output wire        sub_nvi_trig,  // 1-clk pulse at line 240 -> NVI to BOTH Z8002s
 
     // ---- shared video-RAM byte port (Z80 view, 0x4000-0x57FF) ------------------
     //   sprite 0x4000-0x47FF | road 0x4800-0x4BFF | alpha 0x4C00-0x4FFF | view 0x5000-0x57FF
-    //   Byte<->word lane mapping to the Z8002 side is resolved at pp_top (Z8002 phase).
     output wire [12:0] vram_addr,     // offset within the 0x4000-0x5FFF window
     output wire  [7:0] vram_dout,
     output wire        vram_wr,
     output wire        vram_rd,
-    input  wire  [7:0] vram_din,      // #unused now that PolePosition_subcpu is
-                                       // instantiated below (kept for interface
-                                       // stability); real read data comes from
-                                       // subcpu_vram_din internally.
+    input  wire  [7:0] vram_din,  // unused: read data comes from subcpu_vram_din
 
     // ---- Namco 06xx bus (0x9000 data / 0x9100 ctrl, both mirror 0x0EFF) --------
     output wire  [7:0] n06_dout,
     output wire        n06_data_wr, n06_data_rd,
     output wire        n06_ctrl_wr, n06_ctrl_rd,
     input  wire  [7:0] n06_din,
-    input  wire        n06_nmi_n,     // 06xx nmi_generate() -> Z80 NMI (active low). Was tied
-                                       // 1'b1 (permanently inactive) before the 06xx block existed;
-                                       // now driven by namco_06xx.sv via poleposition.vhd.
+    input  wire        n06_nmi_n,  // 06xx NMI -> Z80 NMI (active low)
 
     // ---- Namco WSG sound registers (0x83C0-0x83FF, 64 bytes) -------------------
     output wire  [5:0] wsg_addr,
@@ -91,9 +68,17 @@ module PolePosition_CPU
     input  wire        rom_wr,        // = ioctl_wr & (index==0) & (ioctl_addr < 0x3000)
 
     // ---- sub CPU subsystem (PolePosition_subcpu) -------------------------
-    input  wire        ioctl_wr_idx0, // = ioctl_wr & (index==0), FULL range (sub ROM regions
-                                       //   0x3000-0xAFFF/0xB000-0x12FFF decoded inside the subsystem)
+    input  wire        ioctl_wr_idx0,  // = ioctl_wr & (index==0), full range (sub ROMs decoded inside)
     input  wire        ic25_en,       // PP2 IC25 protection overlay (machine polepos2 only)
+    // ---- bootleg I/O board (MAME topracern_io): machine topracern / polepos2bi only
+    input  wire        bootleg_io,
+    input  wire  [7:0] bl_steer,      // IN  $02  STEER
+    input  wire  [7:0] bl_in0,        // IN  $03  IN0 (topracern layout)
+    input  wire  [7:0] bl_dswa,       // IN  $04  DSWA
+    input  wire  [7:0] bl_dswb,       // IN  $05  DSWB
+    output reg   [3:0] bl_dac,        // OUT $03  4-bit R-2R DAC (explosion)
+    output reg   [7:0] bl_latch,      // OUT $05  sound latch (data | 0xfc, bootleg_soundlatch_w)
+    output wire        bl_latch_wr,
     // video-pipeline scanout: 4 INDEPENDENT read ports (see PolePosition_subcpu)
     input  wire [10:0] scan_sprite_addr,
     output wire [15:0] scan_sprite_dout,
@@ -113,7 +98,7 @@ module PolePosition_CPU
 );
 
     //------------------------------------------------------------------------
-    //  Z80 core (T80s soft core, same as the Kangaroo scaffold)
+    //  Z80 (T80s)
     //------------------------------------------------------------------------
     wire [15:0] cpu_A;
     wire  [7:0] cpu_Dout;
@@ -170,6 +155,22 @@ module PolePosition_CPU
 
     // Z80 I/O space: ADC0804 at port 0x00 (z80_io, polepos.cpp:456-460)
     wire cs_io_adc = ~n_iorq & (cpu_A[7:0] == 8'h00);
+    // bootleg I/O board ports $02-$05 (topracern_io); M1 excluded so an interrupt acknowledge never decodes here
+    wire cs_io_bl  = ~n_iorq & n_m1 & bootleg_io & (cpu_A[7:0] >= 8'h02) & (cpu_A[7:0] <= 8'h05);
+    wire cs_io_bl3 = cs_io_bl & (cpu_A[7:0] == 8'h03);
+    wire cs_io_bl5 = ~n_iorq & n_m1 & bootleg_io & (cpu_A[7:0] == 8'h05);
+    wire [7:0] bl_din = (cpu_A[7:0] == 8'h02) ? bl_steer :
+                        (cpu_A[7:0] == 8'h03) ? bl_in0   : bl_dswa;
+    always @(posedge clk) begin
+        if (reset) begin
+            bl_dac   <= 4'd0;
+            bl_latch <= 8'hFC;
+        end else begin
+            if (cs_io_bl3 & wr_s) bl_dac   <= cpu_Dout[3:0];
+            if (cs_io_bl5 & wr_s) bl_latch <= cpu_Dout | 8'hFC;
+        end
+    end
+    assign bl_latch_wr = cs_io_bl5 & wr_s;
 
     //------------------------------------------------------------------------
     //  LS259 control latch (8E) — write_d0: A[2:0] selects bit, D0 is data
@@ -191,8 +192,7 @@ module PolePosition_CPU
 
     //------------------------------------------------------------------------
     //  IRQ generation (polepos.cpp scanline() :392-403)
-    //   maincpu IRQ asserted at 64V and 192V when q0=1; q0=0 acks/clears.
-    //   sub NVI trigger pulsed at 240V (line gating done per-Z8002 elsewhere).
+    //   main CPU IRQ at 64V and 192V when q0=1; sub NVI trigger at 240V
     //------------------------------------------------------------------------
     reg [8:0] vpos_d;
     always @(posedge clk) vpos_d <= vpos;
@@ -233,19 +233,9 @@ module PolePosition_CPU
     );
 
     //------------------------------------------------------------------------
-    //  NVRAM (0x3000-0x37FF, battery-backed in MAME) — 2 KB
-    //  MAME ground truth: polepos.cpp:927 NVRAM(config, "nvram", nvram_device::DEFAULT_ALL_1)
-    //  -> a fresh/unbacked NVRAM powers up filled with 0xFF. Our core doesn't
-    //  battery-back/persist this RAM, so power-on state is all that matters.
-    //  Was plain `spram` (powers up 0x00, diverging from MAME); swapped to
-    //  dpram_dc (already used above for prog_rom, same 1-cycle read latency —
-    //  outdata_reg_a defaults UNREGISTERED, matching spram's registered-q
-    //  timing) so its init_file generic can point altsyncram at an all-FF .mif.
-    //  Port B is unused (tied off; dpram_dc's wren_b/data_b/byteena_* default
-    //  safely, same as the prog_rom instance above — only address_b/clock_b
-    //  need an explicit connection since those VHDL ports have no default).
+    //  NVRAM (0x3000-0x37FF), 2 KB; powers up all-FF like MAME (DEFAULT_ALL_1)
     //------------------------------------------------------------------------
-    wire sub1_illegal_w, sub2_illegal_w;   // ILLEGAL-SCREAM-2026-08-09
+    wire sub1_illegal_w, sub2_illegal_w;
 
     wire [7:0] nvram_D;
     dpram_dc #(.widthad_a(11), .init_file("rtl/ram_rom/pp_nvram_ff.mif")) nvram
@@ -316,12 +306,13 @@ module PolePosition_CPU
         (cs_06d | cs_06c) ? n06_din :
         cs_aready  ? ready_val      :
         cs_io_adc  ? adc_din        :
+        cs_io_bl5  ? bl_dswb        :
+        cs_io_bl   ? bl_din         :
         8'hFF;
 
     //------------------------------------------------------------------------
     //  Sub CPU subsystem — two Z8002 game CPUs + shared video RAM
-    //  (rtl/PolePosition_subcpu.sv). Z80 byte port <-> vram_* above;
-    //  sub1/2_reset_n + sub_nvi_trig from the LS259/IRQ sections above.
+    //  (rtl/PolePosition_subcpu.sv)
     //------------------------------------------------------------------------
     wire [7:0] subcpu_vram_din;
 
@@ -330,7 +321,7 @@ module PolePosition_CPU
         .ic25_en      (ic25_en),
         .clk          (clk),
         .reset        (reset),
-        .pause        (pause),          // PAUSE-GATE-2026-08-05: freeze both Z8002s
+        .pause        (pause),  // freeze both Z8002s
 
         .sub1_reset_n (sub1_reset_n),
         .sub2_reset_n (sub2_reset_n),

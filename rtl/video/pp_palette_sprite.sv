@@ -1,21 +1,8 @@
 //============================================================================
-//  pp_palette_sprite.sv — Pole Position SPRITE layer palette lookup
-//
-//  Ports MAME's polepos_palette() sprite arithmetic verbatim (polepos_v.cpp
-//  :106-114). Like pp_palette_alpha it HAS transparency + 128V banking:
-//
-//    stage 1: promval = sprite_prom[ {color[5:0], pen[3:0]} ]  (proms 0xc00,1024)
-//             transparent = (promval == 4'hF)          (MAME transpen 0x1f)
-//    stage 2: indirect = bank128v ? (0x50+promval) : (0x10+promval)
-//    stage 3: r/g/b nib = {red,green,blue}_prom[indirect]     (proms 0x000/1/2)
-//    stage 4: R/G/B = weighted-resistor DAC (0x0e/1f/43/8f)
-//
-//  bank128v = the sprite's 0x40 colour bit (draw_sprites: `if (sy>=128) color|=0x40`).
-//  Index is {color[5:0], pen[3:0]} = colour group * 16 + the 4bpp pen (granularity 16).
-//
-//  PROM load: sprite_prom is 0xc00-0xFFF (prom_addr[11:10]==2'b11, idx=[9:0]);
-//  R/G/B are 0x000/0x100/0x200 (prom_addr[11:8]=0/1/2, idx=[7:0]). 12-bit addr.
-//  Latency = 2 clk (matches the other palettes for compositor alignment).
+//  pp_palette_sprite.sv -- sprite palette, MAME polepos_palette() (polepos_v.cpp):
+//    promval = sprite_prom[{color, pen}] (0xC00, 1024 entries), transparent if 15
+//    indirect = bank128v ? 0x50 + promval : 0x10 + promval -> R/G/B PROMs. Latency 2 clk.
+//  diag_en / diag_indirect: palette swatch overlay (OSD diagnostic).
 //============================================================================
 
 `default_nettype none
@@ -72,7 +59,7 @@ module pp_palette_sprite
     wire s1_transp = (promval == 4'hF);
 
     wire [7:0] indirect_norm = s1_bank ? (8'h50 + {4'h0, promval}) : (8'h10 + {4'h0, promval});
-    wire [7:0] indirect      = diag_en ? diag_indirect : indirect_norm;   // DIAG
+    wire [7:0] indirect      = diag_en ? diag_indirect : indirect_norm;  // palette swatch overlay
     reg  [3:0] r_nib, g_nib, b_nib;
     reg        s2_transp;
     always @(posedge clk) begin

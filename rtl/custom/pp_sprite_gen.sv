@@ -1,27 +1,9 @@
 //============================================================================
-//  pp_sprite_gen.sv — Pole Position SPRITE layer engine
-//
-//  Faithful RTL port of MAME draw_sprites()/zoom_sprite() (polepos_v.cpp
-//  :375-448). 64 zoomed 4bpp sprites drawn into a per-scanline line buffer:
-//    * attributes from the scan_sprite buffer (sprite16_memory): pos @0x380,
-//      size @0x780, stride 2 words per sprite.
-//    * vertical zoom: scalelut ROM (region 0x1000) picks the source row `dy`.
-//    * horizontal zoom: the `siz += 1 + sizex` DDA advances the dest x.
-//    * 4bpp PLANAR decode ON THE FLY: planes 0/1 in the low-half byte, planes
-//      2/3 in the RGN_FRAC(1,2) high-half byte; 4 pixels/byte per the
-//      {0,1,2,3,8,9,10,11,...} x-offsets => 2 ROM byte reads per pixel.
-//    * transpen 0x1f (sprite_prom entry==15) => skip; process sprites 0..63 so
-//      sprite 63 ends up on top. 128V palette bank = sy>=128.
-//
-//  STRUCTURE: line-buffer, double-buffered (generate scanline Y into the
-//  non-display bank during Y-1; output reads the display bank at pixel rate).
-//  Clk-paced generation FSM. ** UNVERIFIED DRAFT ** — VERIFY via co-sim diff vs
-//  a C++ zoom_sprite port; the decode BIT-ORDER (MSB-first assumption below) and
-//  the DDA are the bug-prone bits, do NOT hand-debug.
-//
-//  Combined sprite gfx ROM layout (as the top loads it):
-//    small (16x16) @ 0x00000 (0x4000; planes 2/3 hi-half +0x2000)
-//    big   (32x32) @ 0x04000 (0x10000; planes 2/3 hi-half +0x8000)
+//  pp_sprite_gen.sv -- Pole Position sprite layer.
+//  Port of MAME draw_sprites() / zoom_sprite() (polepos_v.cpp): 64 zoomed 4bpp sprites into a
+//  double-buffered line buffer (attributes @0x380 / @0x780, scalelut vertical zoom, siz DDA horizontal
+//  zoom, planar decode on the fly, transpen = sprite PROM 15, sprite 63 on top).
+//  Sprite gfx ROM: small (16x16) @0x00000 (planes 2/3 +0x2000), big (32x32) @0x04000 (planes 2/3 +0x8000).
 //============================================================================
 
 `default_nettype none
@@ -109,7 +91,7 @@ module pp_sprite_gen
     wire p1b = byte_lo    [3'd3 - {1'b0, cq}];
     wire p2b = sprgfx_data[3'd7 - {1'b0, cq}];
     wire p3b = sprgfx_data[3'd3 - {1'b0, cq}];
-    wire [3:0] pen = {p0b, p1b, p2b, p3b};   // DIAG: pen bit order REVERSED
+    wire [3:0] pen = {p0b, p1b, p2b, p3b};  // plane order p0..p3
     wire pen_transp = (sprite_prom[{color, pen}] == 4'hF);
 
     // ---- DDA next-siz (MAME: siz+=1+sizex; if(siz&0x40){siz&=0x3f; xx++}) ---
@@ -185,22 +167,8 @@ module pp_sprite_gen
     end
 
     // ---- output (ce-paced read) --------------------------------------------
-    // ---- AREA TODO 2026-07-19 (NOT DONE -- deliberately left async) --------------------
-    // Both `linebuf` (512x12) and `sprite_prom` (1024x4) fail BRAM inference here because
-    // they are read COMBINATIONALLY -- Quartus: "uninferred due to asynchronous read logic".
-    // They are built from flip-flops + wide muxes and are a large part of pp_sprite_gen's
-    // 5,863 ALMs. pp_road_gen got the equivalent fix (registered read) and it is verified.
-    //
-    // WHY NOT HERE YET: this engine is currently VERIFIED CORRECT against the MAME
-    // zoom_sprite/draw_sprites oracle (sprite co-sim: 0 / 57,344 px). The stock rig samples
-    // combinationally with NO clk edge, so it cannot evaluate a registered read at all; and
-    // a naive clock-accurate version of that rig is UNFAIR -- it fails the known-good async
-    // design at 6.93%, because the generation FSM keeps running during the sampling loop and
-    // clears entries. Fixing the rig (isolate generation from sampling) MUST come first;
-    // do not convert these reads until a rig that still passes the async baseline exists.
-    // `sprite_prom` additionally needs an extra FSM state or a per-sprite prefetch of the 16
-    // entries for the current `color` (constant across a sprite), since `pen` only becomes
-    // valid in S_PIX.
+    // linebuf / sprite_prom are read combinationally (logic, not BRAM): converting them needs a
+    // clock-accurate co-sim rig first (verilator/sprite).
     wire        disp_bank = vpos[0];
     wire [11:0] oent = linebuf[{disp_bank, hpos[7:0]}];
     assign sprite_active = oent[11];

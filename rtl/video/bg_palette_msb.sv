@@ -1,15 +1,5 @@
 //============================================================================
-//  bg_palette_msb.sv -- 1:1 transliteration of rtl/bg_palette_msb.vhd
-//  (Pole Position palette PROM, MSB nibble).
-//
-//  Mechanical VHDL -> SystemVerilog port, 2026-08-05. This is a plain ROM/LUT
-//  init wrapper: a hardcoded 512x8 lookup table with a single synchronous
-//  (registered) read port, no write port, no byteena, no reset. addr is 9-bit
-//  (0..511), matching the array bounds exactly -- no out-of-range case exists.
-//  Read latency is 1 clock (data <= rom_data[addr], registered same as the VHDL
-//  process). Data values below are transcribed byte-for-byte from the VHDL
-//  positional aggregate, same 16-values-per-line grouping, for easy line-by-line
-//  audit against the .vhd (source of truth; do not edit that file).
+//  bg_palette_msb.sv -- SystemVerilog port of bg_palette_msb.vhd: 512x8 ROM, registered read.
 //============================================================================
 `default_nettype none
 

@@ -1,30 +1,8 @@
 //============================================================================
-//  pp_palette_alpha.sv — Pole Position ALPHA (text) layer palette lookup
-//
-//  Ports MAME's polepos_palette() index arithmetic verbatim (polepos_v.cpp
-//  :30-135) for the alpha layer, per the audit's recommendation (avoid
-//  reverse-engineering the real PROM address-pin order). Two chained table
-//  lookups + the weighted-resistor RGB DAC:
-//
-//    stage 1: promval = alpha_prom[ {color6, pixel} ]           (proms 0x300)
-//             transparent = (promval == 4'hF)          (MAME transpen = 0x2f)
-//    stage 2: indirect  = bank128v ? (0x60+promval) : (0x20+promval)
-//             r/g/b nib = {red,green,blue}_prom[indirect]  (proms 0x000/1/2)
-//    stage 3: R/G/B = weighted DAC of the nibble: bit weights {0e,1f,43,8f}
-//
-//  NOTE PP uses the *weighted-resistor* DAC (0x0e/0x1f/0x43/0x8f), NOT the
-//  raw-nibble passthrough Xevious's red/green/blue.vhd used — regenerate, do
-//  not copy those tables (video_mapping §3).
-//
-//  128V banks 0x020+/0x060+ are physically IDENTICAL colours on real HW (MAME
-//  comment polepos_v.cpp:42-51) — we still implement the bank select for
-//  faithfulness; it is visually irrelevant, so first-light works with either.
-//
-//  PROM tables are loaded from the ioctl "proms" region (0x000-0x3FF slice)
-//  via prom_wr/prom_addr/prom_data — addr[9:8] selects table, addr[7:0] entry.
-//  Held as four independent 256x-wide read ports so the two chained lookups
-//  (alpha, then r+g+b) each get a dedicated port. Latency = 2 clk (registered
-//  BRAM reads); caller aligns via the video counter offset.
+//  pp_palette_alpha.sv -- alpha (text) palette, MAME polepos_palette() (polepos_v.cpp):
+//    promval = alpha_prom[{color, pixel}] (0x300), transparent if 15
+//    indirect = bank128v ? 0x60 + promval : 0x20 + promval -> R/G/B PROMs (0x000/0x100/0x200)
+//    weighted-resistor DAC 0x0e/0x1f/0x43/0x8f. Latency 2 clk.
 //============================================================================
 
 `default_nettype none

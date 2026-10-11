@@ -1,29 +1,7 @@
 //============================================================================
-//  pp_palette_view.sv — Pole Position VIEW/BG (scenery) layer palette lookup
-//
-//  Ports MAME's polepos_palette() index arithmetic verbatim for the bg/view
-//  layer (polepos_v.cpp:94-103), the sibling of pp_palette_alpha:
-//
-//    stage 1: promval = view_prom[ {color6, pixel2} ]        (proms 0x400)
-//    stage 2: indirect = 0x00 + promval                      (MAME: 0x000+color)
-//    stage 3: r/g/b nib = {red,green,blue}_prom[indirect]    (proms 0x000/1/2)
-//    stage 4: R/G/B = weighted-resistor DAC (0x0e/1f/43/8f)  (same as alpha)
-//
-//  DIFFERENCES from pp_palette_alpha (all per MAME):
-//    * NO transparency — the bg/view has no transpen (line 102 is an unconditional
-//      0x000+color). It is the OPAQUE bottom layer; alpha's transparency is what
-//      reveals it. So there is no `transparent` output.
-//    * NO 128V banking — single bank (line 99-103, no 0x060 sibling).
-//    * indirect resolves to 0x00..0x0F (promval is 4-bit), i.e. the bg colours
-//      live in the first 16 entries of the shared R/G/B DAC PROMs.
-//
-//  The R/G/B DAC PROMs (0x000/0x100/0x200) are SHARED with the alpha stage on
-//  real HW; this module keeps its own copies (tiny 256x4 tables) so it is a
-//  self-contained drop-in like pp_palette_alpha. Latency = 2 clk (matches
-//  pp_palette_alpha so the compositor can align the two layers with one delay).
-//
-//  PROM load: ioctl "proms" region. prom_addr[10:8] selects the table
-//  (0=R@0x000, 1=G@0x100, 2=B@0x200, 4=view@0x400); prom_addr[7:0]=entry.
+//  pp_palette_view.sv -- view (background) palette, MAME polepos_palette() (polepos_v.cpp):
+//    promval = view_prom[{color, pixel}] (0x400); indirect = promval -> R/G/B PROMs; same DAC as alpha.
+//    Opaque, single bank. Latency 2 clk.
 //============================================================================
 
 `default_nettype none

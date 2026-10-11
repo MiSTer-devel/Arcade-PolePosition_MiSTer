@@ -1,41 +1,8 @@
 //============================================================================
-//  pp_tile_layer.sv — Pole Position tilemap layer render pipeline
-//
-//  One instance renders ONE 8x8 2bpp tilemap layer (alpha OR view). It:
-//    * generates the tilemap-scan buffer index from the display pixel position
-//      (per MAME's TILEMAP_SCAN order + tilemap dimensions);
-//    * drives this layer's dedicated scanout read port on PolePosition_subcpu
-//      (my Part-2 step-1 4-port change) — a COMBINATIONAL word read;
-//    * drives this layer's gfx ROM port (chars/tiles region, assumed a
-//      SYNCHRONOUS 1-clk read) and fetches the two nibble-planar bytes;
-//    * decodes to a per-pixel {color, pixel} via pp_tile_decode (x2).
-//
-//  Parameterized for the two PP layers (both 8x8, 2bpp, charlayout_2bpp):
-//    alpha ("chars") : SCAN_COLS=0 (TILEMAP_SCAN_ROWS), 32x32, no scroll,
-//                      BANK_128V=1  (polepos_v.cpp:186,169)
-//    view  ("tiles") : SCAN_COLS=1 (TILEMAP_SCAN_COLS), 64x16, hscroll,
-//                      BANK_128V=0  (polepos_v.cpp:185,263)
-//  COLS/ROWS are powers of two for both (32/32, 64/16) → index math is shifts.
-//
-//  ── TIMING MODEL (the part to VERIFY in the co-sim; see sim_layer harness) ──
-//  Single pixel-clock domain, advanced by `ce` (1 pulse per output pixel).
-//  `hpos`/`vpos` = the DISPLAY pixel being output THIS `ce` (visible-region
-//  pixel coords; caller maps gen_video hcnt/vcnt→these incl. any global flip).
-//  Effective X: x_disp = hpos (+hscroll for view). Intra-tile phase p =
-//  x_disp[2:0]. Each 8-pixel span we PREFETCH the next tile (x_fetch=x_disp+8,
-//  constant across the span) and latch it at p==7, so the tile being displayed
-//  is always the one prefetched during the previous span. Two gfx-ROM byte
-//  reads (left x0-3, right x4-7) are issued at p==0/p==1 and captured at
-//  p==1/p==2 (1-clk ROM latency). Pixel output is COMBINATIONAL (0 added
-//  latency) from the latched display-tile bytes + col=p.
-//
-//  #verify-in-sim: (a) the p==0/1/2/7 gfx sequence vs the real 1-clk ROM
-//  latency; (b) first tile of a scanline must be prefetched during the trailing
-//  8 counts of hblank (caller must free-run the counters through blank);
-//  (c) integration counter offset/flip (Xevious §3 "fudge constants") — NOT
-//  handled here, that is a step-3 wiring concern.
-//  Ground truth: Claude/polepos_video_mapping_2026-07-13.md §2-3, polepos_v.cpp
-//  :145-186, polepos.cpp:820-829.
+//  pp_tile_layer.sv -- Pole Position 8x8 2bpp tilemap layer (alpha or view).
+//    alpha: SCAN_COLS=0, 32x32, no scroll, BANK_128V=1     view: SCAN_COLS=1, 64x16, hscroll, BANK_128V=0
+//  Based on MAME polepos_v.cpp tilemaps. The next tile is prefetched during the current 8-pixel span;
+//  the two gfx ROM bytes are read at interior phases and latched at p == 7; pixel output is combinational.
 //============================================================================
 
 `default_nettype none
@@ -112,12 +79,7 @@ module pp_tile_layer #(
 
     always @(posedge clk) begin
         if (ce) begin
-            //  Issue the two ROM reads at INTERIOR phases (p 2..4), never at
-            //  p==0: p==0 is the x_fetch tile boundary (x_fetch = hpos+8 = D*8
-            //  exactly), where the fetch-address path resolves to the PREVIOUS
-            //  tile — measured: a p==0 LEFT read latched tile D-1 while a p==1
-            //  RIGHT read latched tile D, so LEFT lagged RIGHT by one tile.
-            //  Interior phases see the stable current fetch tile for both.
+            //  Read at interior phases (p 2..4): at p == 0 the fetch address still points at the previous tile.
             case (p)
                 3'd2: gfx_addr <= fetch_gfx_l;           // issue LEFT  addr
                 3'd3: begin
@@ -128,9 +90,7 @@ module pp_tile_layer #(
                 3'd7: begin                              // latch for next span
                           disp_byte_l <= nxt_byte_l;
                           disp_byte_r <= nxt_byte_r;
-                          // polepos_v.cpp:162-166 -- chacl==0 (reset default) forces
-                          // color=0 regardless of VRAM contents; only the alpha
-                          // instance gates on this (view ties chacl=1, always full color).
+                          // chacl == 0 forces colour 0 (alpha only; view ties chacl = 1)
                           disp_color  <= chacl ? fetch_color : 6'd0;
                       end
                 default: ; // idle phases

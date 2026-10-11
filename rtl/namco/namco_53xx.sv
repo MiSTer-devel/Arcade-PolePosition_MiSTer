@@ -1,39 +1,8 @@
 //============================================================================
-//  namco_53xx.sv — Namco 53xx I/O MCU wrapper (steering/DSW reader)
-//
-//  Ground truth: MAME src/devices/machine/namco53.cpp (namco_53xx_device) +
-//  src/mame/namco/polepos.cpp machine_config (:901-906, :918-919) + the
-//  polepos_state steering helpers (polepos.cpp :362-389, steering_changed_r
-//  / steering_delta_r — these are CPU-side in MAME, not part of namco53.cpp
-//  itself, but are bundled into this wrapper per the spec: this chip "owns"
-//  everything the 53xx chip-select session touches).
-//  MB8843 4-bit MCU (rtl/cpu/mb88_sv/mb88.sv) + its 0x400 internal mask ROM
-//  (ioctl index 6, offset 0x400-0x7FF, 53xx.bin crc b326fecb).
-//
-//  polepos machine_config port wiring:
-//    k_port_callback = namco_53xx_k_r, HARDWIRED TO 0 in polepos.cpp (comment:
-//                       "hardwired to 0") -> k_port_in tied to 4'h0 here.
-//    input<0> = steering_changed_r   (R0, bit0 only meaningful)
-//    input<1> = steering_delta_r     (R1, bit0 only meaningful)
-//    input<2> = DSWA & 0x0f          (R2)
-//    input<3> = DSWA >> 4            (R3)
-//    p_port_callback: NOT bound for polepos -> P output unwired.
-//  Unlike 51xx, NO write_callback<1> is bound in polepos.cpp (namco53.cpp has
-//  no write() method at all) — this wrapper has no wr_en/wr_data input; the
-//  Z80 can select+read chip1 but writes to it are architecturally a no-op.
-//
-//  ---- STEERING (polepos.cpp steering_changed_r/steering_delta_r, faithfully
-//  reproduced arithmetic) -------------------------------------------------
-//  MAME samples the analog "STEER" dial EVERY TIME the running 53xx firmware
-//  polls R0 (an mb88 "inR" opcode fetch) — there is no fixed rate. Reproducing
-//  that exactly would need a read-strobe tapped out of mb88_core's opcode
-//  decode (not currently exposed). This wrapper instead updates the
-//  accumulator once per `ena` tick (1.536 MHz, the MCU's own clock enable) —
-//  faster than any real poll rate, so it never falls behind physical wheel
-//  motion, at the cost of not being cycle-exact. #unverified / KNOWN ITERATION
-//  POINT: steer_in itself has NO real analog source wired yet either (see
-//  Arcade-PolePosition.sv's steer_in placeholder) — steering feel needs HW
-//  iteration regardless of this module's timing choice.
+//  namco_53xx.sv -- Namco 53xx I/O MCU (steering / DSWA): MB8843 + 1 KB mask ROM (ioctl index 6, 0x400).
+//  Based on MAME src/devices/machine/namco53.cpp and polepos.cpp (steering_changed_r / steering_delta_r).
+//    K = 0 (hardwired), R0/R1 = steering changed / delta, R2/R3 = DSWA low/high nibble. Read-only over the 06xx.
+//  The steering accumulator updates every MCU clock rather than on each R0 poll.
 //============================================================================
 `default_nettype none
 
@@ -59,7 +28,6 @@ module namco_53xx
 );
 
     // ---- steering accumulator (polepos.cpp steering_changed_r, verbatim
-    //      arithmetic; see header for the update-rate simplification) -------
     reg  [7:0]       steer_last;
     reg  signed [8:0] steer_accum;
     reg              steer_delta;
@@ -129,9 +97,7 @@ module namco_53xx
         .rom_data   (rom_data)
     );
 
-    // read() returns m_portO directly (O_w has no scheduler sync in namco53.cpp,
-    // unlike 51xx) — no external write path exists either (see header), so the
-    // MCU's own O-port register is the whole story; no separate mailbox needed.
+    // read() returns the O-port directly (no shared mailbox)
     assign data_out = {oh_w, ol_w};
 
     // ---- 0x400 internal MCU ROM (ioctl index 6, offset 0x400-0x7FF) -------

@@ -1,20 +1,7 @@
 //============================================================================
-//  pp_video_composite.sv — Pole Position full video compositor
-//
-//  Supersedes pp_tile_composite: instantiates ALL four layers + their palettes
-//  and composites per MAME screen_update() (polepos_v.cpp:451-460):
-//      view/bg (opaque, vpos<128)  OR  road (opaque, vpos>=128)   <- bottom
-//      sprites (transpen 0x1f)                                     <- middle
-//      alpha/text (transparency)                                  <- top
-//
-//  base  = (vpos<128) ? view_rgb : road_rgb
-//  mid   = sprite_active ? sprite_rgb : base      (engine already dropped transp)
-//  final = alpha_transparent ? mid : alpha_rgb
-//
-//  Latency: every layer's RGB is 2 clk after its combinational hpos/vpos-driven
-//  generator output, and 2 clk << one ~8-clk pixel period, so the STABLE current
-//  hpos/vpos + engine flags align with the palette RGB — no extra delay (same as
-//  pp_tile_composite). ** road/sprite generators are UNVERIFIED drafts — co-sim. **
+//  pp_video_composite.sv -- Pole Position video compositor (MAME screen_update, polepos_v.cpp):
+//      view (vpos < 128) or road (vpos >= 128), then sprites (transpen), then alpha (transparency)
+//  Every palette output is 2 clk after its generator, well inside one pixel period.
 //============================================================================
 
 `default_nettype none
@@ -26,7 +13,7 @@ module pp_video_composite
     input  wire [8:0]  hpos,
     input  wire [8:0]  vpos,
     input  wire        chacl,        // LS259 q7: alpha color+msb enable (0 at reset)
-    input  wire        diag_swatch,  // DIAG-REVERT-2026-08-16: palette swatch overlay (OSD O7)
+    input  wire        diag_swatch,  // palette swatch overlay (OSD diagnostic)
 
     // ---- ALPHA ----
     output wire [10:0] alpha_scan_addr,  input wire [15:0] alpha_scan_dout,
@@ -54,17 +41,6 @@ module pp_video_composite
     output wire [3:0]  g,
     output wire [3:0]  b
 );
-    // NOTE: the h-offset belongs in the layer modules, not here (subtracting a
-    // constant 128 from hpos) was based on a wrong premise -- it assumed the
-    // active display width was the full raw hcnt range (128-511, 384px), but
-    // gen_video.vhd's own hblank compares (hcnt=475 assert / hcnt=187
-    // deassert) show the TRUE active region is only hcnt 187-474 (288px).
-    // Real hardware never shows the difference: poleposition.vhd exports
-    // blankn/video_blankn as OUTPUT ports, blanked downstream by MiSTer's own
-    // scandoubler/arcade_video -- this file's raw RGB was never the problem.
-    // The actual bug was in the Verilator CAPTURE (sim_main.cpp/play_main.cpp
-    // never applied that blanking, capturing the full unblanked hblank
-    // region), fixed there instead -- see those files' FIX-2026-07-28 notes.
 
     // ======================= ALPHA =========================================
     wire [5:0] a_color; wire [1:0] a_pixel; wire a_bank;
@@ -91,12 +67,6 @@ module pp_video_composite
             .prom_data(prom_data), .color(v_color), .pixel(v_pixel), .r(vr), .g(vg), .b(vb));
 
     // ======================= ROAD ==========================================
-    // RESTORED-2026-07-28: STARTUP-STRIP-2026-07-27 had this commented out
-    // (cut Quartus/Verilator build time while chasing the boot hang). The
-    // z8002.sv register-writeback-bus refactor freed ~5,400 ALMs, so there's
-    // ample headroom. NOTE: these generators are UNVERIFIED DRAFTS (see file
-    // header) -- never co-sim-proven against MAME, restoring them is turning
-    // on untested code, not known-good code.
     wire [9:0] road_idx; wire road_act;
     pp_road_gen u_road (.clk(clk), .ce(ce), .hpos(hpos), .vpos(vpos),
             .road_vscroll(road_vscroll),
@@ -127,7 +97,7 @@ module pp_video_composite
     wire [7:0] sr, sg, sb; wire s_transp_unused;
     pp_palette_sprite u_pal_s (.clk(clk), .prom_wr(prom_wr), .prom_addr(prom_addr),
             .prom_data(prom_data), .color(s_color), .pen(s_pen), .bank128v(s_bank),
-            .diag_en(sw_on), .diag_indirect(sw_indirect),          // DIAG
+            .diag_en(sw_on), .diag_indirect(sw_indirect),  // palette swatch overlay
             .r(sr), .g(sg), .b(sb), .transparent(s_transp_unused));
 
     // ======================= COMPOSITE =====================================

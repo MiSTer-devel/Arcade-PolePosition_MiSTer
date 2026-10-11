@@ -1,61 +1,19 @@
 //============================================================================
-//  namco_06xx.sv — Namco 06XX bus arbiter (Z80 <-> up to 4 Namco 5xxx MCUs)
+//  namco_06xx.sv -- Namco 06XX bus arbiter: Z80 <-> up to four Namco 5xxx MCUs.
+//  Based on MAME src/devices/machine/namco06.cpp.
 //
-//  Ground truth: MAME src/devices/machine/namco06.cpp (namco_06xx_device).
-//  Interfaces the Z80 (via PolePosition_CPU's n06_* ports, 0x9000 data /
-//  0x9100 ctrl, both mirror 0x0EFF) to chip0=51xx, chip1=53xx, chip2=52xx
-//  (Phase-5, unbuilt), chip3=54xx (Phase-4, unbuilt). Only chip0/chip1 are
-//  wired to real wrappers in this increment; chip2/chip3 read as 0xFF
-//  (matches MAME's devcb_read8 default) and have no write sink.
-//
-//  Control register (ctrl_w, MAME-bit-exact):
-//    [3:0] = chip-select mask (bit0=51xx bit1=53xx bit2=52xx bit3=54xx)
-//    [4]   = R/!W direction (1 = read mode, 0 = write mode)
-//    [7:5] = num_shifts; enable/clock-divider. (ctrl[7:5]==0) => disabled.
-//
-//  data_r (read mode): AND-reduce of the read() outputs of all SELECTED
-//    chips (0xFF for unselected/absent chips) — pure combinational, NOT
-//    gated by the chipsel/NMI timer below (matches namco06.cpp data_r()).
-//  data_w (write mode): broadcasts the written byte to all SELECTED chips'
-//    write() ports — also NOT gated by the timer (matches data_w()/write_sync()).
-//  The chipsel/NMI timer below only drives each MCU's own /IRQ input (so its
-//  OWN firmware knows to service the mailbox) and the Z80's NMI (so the Z80's
-//  boot-time polling loop knows a transfer is ready) — see nmi_generate().
-//
-//  #1 HW-TUNE POINT — TWO deferred/synchronized behaviors from MAME are
-//  reproduced here as a ONE-clk_sys-cycle register delay (ctrl_apply /
-//  data_apply below), NOT MAME's full "next scheduler quantum":
-//    (a) ctrl_w is deferred (machine().scheduler().synchronize) — the Z80
-//        boot code writes ctrl=0x10 then polls ~4 instructions later,
-//        relying on the write NOT being visible instantly.
-//    (b) data_w is deferred the same way.
-//  If HW bring-up shows the Z80 racing/stalling on the 06xx handshake
-//  (self-test stuck, "0" screen not advancing), THIS is the first thing to
-//  re-time — e.g. widen the delay to a full Z80 CE tick, or align to a
-//  falling-CE-edge boundary the way MAME aligns to "the next falling clock
-//  edge" in ctrl_w_sync(). The nmi_generate phase-restart-on-ctrl-write
-//  (div_cnt/timer_state reset in the ctrl_apply branch below) is also a
-//  simplification of MAME's attotime-based "delay to the next falling clock
-//  edge" re-arm — a deterministic restart-to-phase-0 rather than a true
-//  phase-continuous realignment.
-//
-//  Base tick: MAME's 06xx device clock = MASTER_CLOCK/8/64 = 24.576MHz/512 =
-//  48kHz. Our fabric clk_sys = 49.152MHz = 2x MASTER_CLOCK, so clk_sys/1024
-//  is the equivalent 48kHz tick (base_ce below). nmi_generate is invoked
-//  every (divisor/2) base ticks, divisor=2^ctrl[7:5] (1..128, only 2..128
-//  reachable while enabled since ctrl[7:5]==0 means disabled).
+//  Control register: [3:0] chip-select mask (51xx, 53xx, 52xx, 54xx), [4] R/!W, [7:5] clock divider (0 = off).
+//  data_r ANDs the selected chips' outputs; data_w broadcasts to the selected chips.
+//  The chip-select / NMI timer runs off a 48 kHz tick (clk/1024), divisor 2^ctrl[7:5].
+//  ctrl_w / data_w take effect one clock late (MAME defers them to the next scheduler slice).
 //============================================================================
 `default_nettype none
 
 module namco_06xx
 (
     input  wire        clk,        // fabric clock (CLK_49M, 49.152 MHz)
-    input  wire        reset,      // active-high SYSTEM reset (NOT the LS259 namco_reset,
-                                    // which only gates the MCUs' own reset_n externally)
-    input  wire        pause,      // MiSTer pause (freezes the Z80/Z8002 CEN elsewhere) --
-                                    // freezes the NMI/chipsel timer too so a paused frame
-                                    // (e.g. a diagnostic screenshot) doesn't keep the 06xx
-                                    // handshake advancing behind the frozen CPU's back
+    input  wire        reset,  // system reset (not the LS259 Namco reset)
+    input  wire        pause,  // MiSTer pause: freezes the NMI / chip-select timer
 
     // ---- Z80-side bus (PolePosition_CPU n06_* ports) ----------------------
     input  wire  [7:0] cpu_dout,
@@ -69,11 +27,10 @@ module namco_06xx
     output wire        rw0,         // R/!W direction line — MAME binds rw_callback<0> (51xx) ONLY
     input  wire  [7:0] chip0_din, chip1_din, chip2_din, chip3_din,
     output wire  [7:0] chip_dout,   // broadcast write data to selected chip(s)
-    output wire  [3:0] chip_wr      // per-chip write strobe (chip1/53xx has no MAME write
-                                    // binding — namco_53xx.sv simply doesn't use chip_wr[1])
+    output wire  [3:0] chip_wr  // per-chip write strobe (the 53xx has none)
 );
 
-    // ---- deferred ctrl_w / data_w (see header #1 HW-TUNE POINT) ------------
+    // ---- deferred ctrl_w / data_w ----
     reg [7:0] ctrl_wdata_d;  reg ctrl_apply;
     reg [7:0] data_wdata_d;  reg data_apply;
     always @(posedge clk) begin
@@ -115,8 +72,6 @@ module namco_06xx
         end else if (ctrl_apply) begin
             // ctrl_w_sync equivalent (deferred write commits now)
             ctrl    <= ctrl_wdata_d;
-            // div_cnt/timer_state are deliberately NOT preloaded from ctrl here:
-            // the closer match to namco06.cpp:186-223 measured worse on the 51xx reply.
             div_cnt <= 7'd0;
             timer_state <= 1'b0;
             if (ctrl_wdata_d[7:5] == 3'b000) begin
@@ -162,28 +117,9 @@ module namco_06xx
     wire [7:0] d3 = ctrl[3] ? chip3_din : 8'hFF;
     wire [7:0] data_r_val = d0 & d1 & d2 & d3;
 
-    // ---- N06-DATAHOLD-2026-08-11: A/B SWITCH #1 ---------------------------
-    // data_r_val above is a FREE-RUNNING combinational tap of the 51xx's live
-    // `mailbox` register: nothing holds the reply byte still for the duration of
-    // a transfer, so the Z80 samples whatever the MCU happens to hold at that
-    // instant. Measured symptom this targets: a slipped burst reads
-    // `74, 74, FF` instead of `7F, 74, FF` -- the SAME mailbox value twice,
-    // missing one entirely (~8% of reads, periodic 3/4/13 beat).
-    //
-    // MAME is structurally identical here but NOT behaviourally: it evaluates
-    // data_r() at a scheduler-defined instant with the MCU advanced to exactly
-    // that point. Real concurrent hardware has no such guarantee.
-    //
-    //   HOLD_MODE 0 = OFF, the pre-2026-08-11 free-running tap (baseline)
-    //   HOLD_MODE 1 = capture at select-window CLOSE. The MCU has had the whole
-    //                 window to respond; the Z80 reads it during the NEXT window.
-    //   HOLD_MODE 2 = capture at select-window OPEN, i.e. the value the MCU
-    //                 settled on during the PREVIOUS window.
-    // 1 and 2 differ by one transfer of pipelining. I do not know which matches
-    // the real 06xx's data latch, so both are exposed rather than guessed --
-    // and CTRL-REARM-FIX-2026-08-10 is the standing warning about shipping a
-    // "more faithful" 06xx change without measuring it.
-    localparam HOLD_MODE = 0;   // HOLDMODE-0-2026-09-20 (was 1)
+    // read-data hold: 0 = live tap of the selected chips (MAME data_r), 1 = capture at window close,
+    // 2 = capture at window open.
+    localparam HOLD_MODE = 0;
 
     wire win_close = enabled && base_ce && !pause && (div_cnt == div_limit) &&  timer_state;
     wire win_open  = enabled && base_ce && !pause && (div_cnt == div_limit) && ~timer_state;

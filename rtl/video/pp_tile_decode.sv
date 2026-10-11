@@ -1,29 +1,7 @@
 //============================================================================
-//  pp_tile_decode.sv — Pole Position 2bpp tile graphics decode datapath
-//
-//  Covers BOTH tilemap layers — alpha ("chars") and view ("tiles") — because
-//  they use the IDENTICAL MAME charlayout_2bpp (polepos.cpp:862-864). This is
-//  the PP-specific replacement for the Xevious code/attr-split + 2bpp serialize
-//  (poleposition.vhd:768-837); per the Part-2 audit, "only the address-gen
-//  formula and the code/attr source bits need re-deriving" — that is exactly
-//  and only what lives here.
-//
-//  SCOPE — this module is PURE COMBINATIONAL DATAPATH. It does NOT own:
-//    * the tilemap-scan address (screen H/V -> buffer word index) — caller
-//      drives the scan_{alpha,view}_addr port and hands the fetched word in
-//      (that mapping needs a polepos_v.cpp tilemap-scan read; still TODO);
-//    * fetch scheduling / scan-port arbitration — the future slot scheduler
-//      (conversion-plan step 5, the CE-domain-vs-clock_18 open question);
-//    * global screen (cocktail) flip — caller applies it to `row`/`col` the
-//      same way Xevious XORs hcnt(2:0) with `flip` (poleposition.vhd:833).
-//  Those are Xevious-reusable structure + the new arbiter; they wrap THIS.
-//
-//  Ground truth:
-//    charlayout_2bpp   : polepos.cpp:820-829  (8x8, 2bpp, planeoffset {0,4},
-//                        16 bytes/tile; byte y = LEFT 4px, byte y+8 = RIGHT 4px,
-//                        each byte nibble-planar: lo nibble=plane0, hi=plane1)
-//    code/color unpack : polepos_v.cpp:145-171 (bg_/tx_get_tile_info), distilled
-//                        in Claude/polepos_video_mapping_2026-07-13.md §2
+//  pp_tile_decode.sv -- Pole Position 2bpp tile decode (alpha and view, MAME charlayout_2bpp):
+//  16 bytes per tile, byte y = left 4 px, byte y+8 = right 4 px, low nibble = plane 0.
+//  code = {word[14], word[7:0]}, colour = word[13:8] (polepos_v.cpp tile info). Combinational.
 //============================================================================
 
 `default_nettype none
@@ -37,16 +15,14 @@ module pp_tile_decode
     output wire  [5:0] tile_color,     // 6-bit indirect-palette selector
 
     // ---- gfx ROM byte-address generation (2bpp, planes {0,4}) ---------------
-    input  wire  [2:0] row,            // intra-tile row 0..7 (caller pre-applies
-                                       //   any global V-flip)
+    input  wire  [2:0] row,  // intra-tile row 0..7
     output wire [12:0] gfx_addr_l,     // LEFT  half (x0..3) = {code9, 1'b0, row}
     output wire [12:0] gfx_addr_r,     // RIGHT half (x4..7) = {code9, 1'b1, row}
 
     // ---- 2bpp nibble-planar serialize ---------------------------------------
     input  wire  [7:0] gfx_byte_l,     // fetched byte @ gfx_addr_l
     input  wire  [7:0] gfx_byte_r,     // fetched byte @ gfx_addr_r
-    input  wire  [2:0] col,            // intra-tile column 0..7 (caller pre-
-                                       //   applies any global H-flip)
+    input  wire  [2:0] col,  // intra-tile column 0..7
     output wire  [1:0] pixel           // 2bpp value; 0 = transparent (MAME conv.)
 );
 
@@ -77,25 +53,24 @@ module pp_tile_decode
     //     bit position DECREASES within each nibble (x=0 at the nibble's top
     //     bit). Getting either of these backwards was silently plausible (both
     //     compile and "do something") -- this is why it needed re-deriving from
-    //     the source instead of re-guessing: FIX-2026-07-28 for a real, visually
+    // the source instead of re-guessing: for a real, visually
     //     confirmed horizontal mirror (was also a latent plane/color swap).
     //   x<4 -> left byte, x>=4 -> right byte  (col[2] selects the half).
     wire [7:0] sel_byte = col[2] ? gfx_byte_r : gfx_byte_l;
     wire [1:0] x_in_half = col[1:0];
     wire [2:0] bit_p0 = {1'b1, ~x_in_half};   // plane0 -> bits 7,6,5,4 as x=0,1,2,3
     wire [2:0] bit_p1 = {1'b0, ~x_in_half};   // plane1 -> bits 3,2,1,0 as x=0,1,2,3
-    // TILEPEN-ORDER-FIX-2026-08-16: plane0 is the MSB, not the LSB.
-    // Same fault as PENORDER-FIX-2026-08-16 in pp_sprite_gen.sv, which was
+    // plane0 is the MSB, not the LSB.
+    // Same fault as in pp_sprite_gen.sv, which was
     // HW-CONFIRMED today: MAME's decode gives plane 0 the HIGH pen bit
     // (planebit = 1 << (planes-1-plane)). This line had the 2bpp equivalent
     // backwards. For 2bpp, reversal swaps pen1<->pen2 and leaves pen0/pen3
     // fixed, so silhouettes and backgrounds look fine while DETAIL and FILL
     // trade colours -- the mountains' light angled dashes rendered as a brown
-    // smear on teal instead of light dashes on brown (user, 2026-08-16).
+    // smear on teal instead of light dashes on brown (user, .
     // ⚠️ This also feeds the ALPHA layer. Text that uses only pen0/pen3 is
     // unaffected (both are fixed points); if any HUD text changes colour,
     // that is this change and it needs re-checking, not the view layer.
-    // assign pixel = { sel_byte[bit_p1], sel_byte[bit_p0] };   // ORIGINAL
     assign pixel = { sel_byte[bit_p0], sel_byte[bit_p1] };
 
 endmodule

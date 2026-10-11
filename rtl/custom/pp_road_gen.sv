@@ -1,29 +1,9 @@
 //============================================================================
-//  pp_road_gen.sv — Pole Position ROAD layer generator
-//
-//  Faithful RTL port of MAME draw_road() (polepos_v.cpp:304-373). PP's road is
-//  a custom-chip per-scanline generator for the lower half of the screen
-//  (y = 128..255): for each scanline it fetches a 3-plane road ROM and runs a
-//  carry-propagate accumulator to produce a per-pixel road pen index.
-//
-//  STRUCTURE — line-buffer, exactly like MAME (which fills scanline[] then
-//  draw_scanline16). A clk-paced generation FSM computes the NEXT scanline's 264
-//  road pixels into a double-buffered line RAM while the CURRENT scanline is
-//  displayed; the ce-paced output just reads the line RAM. This decouples the
-//  fetch/accumulate timing from the pixel rate and makes the whole thing a
-//  straight transcription of the C++ (verify: co-sim diff vs a draw_road port).
-//
-//  ROM/RAM interfaces (MAME polepos.cpp):
-//    road ROM region 0x5000 : control@0x0000(0x2000) bits1@0x2000(0x2000)
-//                             bits2@0x4000(0x1000). 1-clk sync read.
-//    scan_road (road16_memory) : 0x400 words, COMBINATIONAL read. yoffs->roadpal
-//                             and 0x380+y -> xoffs come from here.
-//    vpos-modifier PROM : 256 x 12-bit, assembled from proms 0x500/0x600/0x700
-//                             (polepos_v.cpp:130-134). Loaded via prom_* here.
-//    road_vscroll : z8002 @0xC100.
-//
-//  Output: road_index[9:0] = (roadpal<<6) | roadval  -> pp_palette_road.
-//          road_active = (vpos >= 128).
+//  pp_road_gen.sv -- Pole Position road layer.
+//  Port of MAME draw_road() (polepos_v.cpp): a clk-paced FSM generates the next scanline's 264 road
+//  pixels into a double-buffered line RAM while the current one is displayed.
+//    road ROM 0x5000: control @0x0000, bits1 @0x2000, bits2 @0x4000; vpos-modifier PROM from proms 0x500-0x7FF.
+//  Output: road_index = (roadpal << 6) | roadval -> pp_palette_road; road_active = (vpos >= 128).
 //============================================================================
 
 `default_nettype none
@@ -71,7 +51,6 @@ module pp_road_gen
     //  display bank = vpos[0], generate bank = ~vpos[0].
     reg [9:0] linebuf [0:1023];         // {gbank, wptr[8:0]} = bank*512 + pixel (pixel 0..263)
     reg [2:0] xscroll_bank [0:1];       // per-buffer xscroll (xoffs & 7)
-    reg [9:0] xoffs_bank   [0:1];       // XOFFS-BAR-DIAG-2026-08-10: full per-line xoffs
 
     // ======================= generation FSM (clk-paced) ====================
     localparam [3:0] G_IDLE=0, G_SET0=1, G_SET1=2, G_CHUNK=3, G_RDC=4,
@@ -123,7 +102,6 @@ module pp_road_gen
         end
         G_SET0W: begin
             xoffs <= scan_road_dout[9:0];          // xoffs = road16_memory[0x380+y] & 0x3ff
-            xoffs_bank[gbank] <= scan_road_dout[9:0];   // XOFFS-BAR-DIAG-2026-08-10
             gstate <= G_SET1;
         end
         G_SET1: begin                              // drives scan_road_addr = yoffs
@@ -204,55 +182,14 @@ module pp_road_gen
     end
 
     // ======================= output (ce-paced read) ========================
-    // this read was combinational (`assign road_index = linebuf[..]`),
-    // which BLOCKS BRAM inference -- Quartus reported "uninferred due to asynchronous read
-    // logic" and built the whole 1024x10 buffer out of flip-flops + a 1024:1 mux
-    // (pp_road_gen was 7,306 ALMs). BRAM reads are synchronous, so the read is now
-    // REGISTERED, which is the inference template. See
-    // [[Sim-model async-read RAM does not infer BRAM]].
-    // TIMING NOTE -- the real pixel period is 3-4 clk, NOT the "~8 clk" the
-    // pp_video_composite header claims: hcnt advances on ena_vidgen, whose slot machine
-    // (poleposition.vhd:459-479) pulses every 3rd/4th clock_18. So the +1 clk here is a
-    // meaningful fraction of a pixel, not free.
-    // The registered value is correct from 1 clk into each pixel and stable for the rest,
-    // including the first pixel of a line. (A `ce`-latched hpos+1 read-ahead would give
-    // zero net latency but breaks pixel 0: the prefetch happens while hpos=383, which
-    // selects entry 128, not 0. Rejected for that reason -- do not "optimise" back to it.)
-    // Verified against the draw_road oracle with a CLOCK-ACCURATE rig (see the road co-sim
-    // under the sim tree). NOTE: the STOCK rig samples combinationally with no clk edge and
-    // therefore cannot evaluate a registered read at all -- it reports 100% mismatch on ANY
-    // synchronous read. Use the clock-accurate sampling loop, not the stock one.
+    // registered read (BRAM inference); valid from 1 clk into each pixel
     wire        disp_bank = vpos[0];
     wire [8:0]  rd = {1'b0, hpos[7:0]} + {6'd0, xscroll_bank[disp_bank]};  // scanline[xscroll+x]
     reg  [9:0]  road_index_r;
     always @(posedge clk) road_index_r <= linebuf[{disp_bank, rd}];
 
-    // XOFFS-BAR-DIAG-2026-08-10 ------------------------------------------------
-    // The road renderer is PROVEN correct (bit-exact vs MAME draw_road on the real
-    // road ROM, verilator/road `make view`), and the ioctl ROM offsets are proven
-    // correct. The ONE input never observed on hardware is what the sub-CPUs write
-    // into road16_memory -- the CHA0-CHA9 lines on operators-manual Sheet 12B.
-    // The rig cannot reach gameplay and FPGA RAM cannot be dumped, so render it:
-    // each road scanline becomes a horizontal BAR whose length = that line's
-    // xoffs (10-bit, scaled >>2 to fit 256 px). ONE screenshot then shows all 128
-    // per-line values at once -- satisfies the "make a single still informative"
-    // capture constraint.
-    //   * bars form a smooth curve  => the CPU is writing sane road data, and the
-    //     fault is further down (vscroll, roadpal, or the ROM read on HW).
-    //   * bars are noise / flat / all >= 0x200 (full-width) => the sub-CPUs are
-    //     writing garbage, and the road bug is a CPU-side problem, not video.
-    // Set DIAG_XOFFS_BAR = 1'b0 to restore normal rendering (single line, below).
-    localparam DIAG_XOFFS_BAR = 1'b0;
-    wire [9:0] xo_disp   = xoffs_bank[disp_bank];
-    wire       bar_on    = ({2'b00, hpos[7:0]} < {2'b00, xo_disp[9:2]});
-    // Pen choice MATTERS: the whole road palette resolves to only EIGHT distinct
-    // colours, and pens 0x00 / 0x3F / 0x40 / 0x7F ALL map to the same grass green
-    // (67,157,14) -- picking those gave a solid green screen with no visible bars.
-    // Verified against palette.bin: pen 10 = white (255,255,255), pen 0 = green.
-    // Use ABSOLUTE pen indices, not the line's own bank, so contrast is guaranteed.
-    wire [9:0] bar_index = bar_on ? 10'd10 : 10'd0;
 
-    assign road_index  = DIAG_XOFFS_BAR ? bar_index : road_index_r;
+    assign road_index  = road_index_r;
     assign road_active = (vpos >= 9'd128);
 
 endmodule

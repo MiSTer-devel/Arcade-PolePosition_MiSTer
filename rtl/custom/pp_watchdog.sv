@@ -1,47 +1,7 @@
 //============================================================================
-//  pp_watchdog.sv — Pole Position Z80 watchdog reset (0xA100)
-//
-//  Ground truth: Useful Stuff/mame/polepos.cpp:925
-//    WATCHDOG_TIMER(config, "watchdog").set_vblank_count(m_screen, 16);
-//  and :1042
-//    map(0xa100, 0xa100).mirror(0x0cff).w("watchdog", FUNC(watchdog_timer_device::reset_w));
-//  -> the Z80 must write $A100 (PolePosition_CPU.sv's watchdog_wr = cs_awdog & wr_s)
-//  at least once every 16 VBLANKs, or the real board resets. watchdog.cpp:104-121
-//  (watchdog_reset()) shows ANY write reloads the counter to m_vblank_count (=16);
-//  watchdog.cpp:158-168 (watchdog_vblank()) decrements once per VBLANK-start and
-//  fires (schedule_soft_reset(), :145-150) when it reaches 0 -- i.e. exactly 16
-//  un-kicked VBLANK-starts elapse between a kick and the reset. Implemented below
-//  as an equivalent up-counter (kick clears it; fires on the 16th un-kicked
-//  VBLANK-start).
-//
-//  VBLANK-start edge: vpos here is fed vcnt straight from rtl/gen_video.vhd
-//  (poleposition.vhd u_pp_cpu port map: vpos => vcnt, so this module sees the
-//  exact same vcnt). gen_video.vhd:124 `if vcntReg = (240+0) then vblank <= '1';`
-//  marks the start of vertical blanking (vtotal = 264 lines, vcnt 0..263, see
-//  gen_video.vhd:56-59/71). PolePosition_CPU.sv:193 already keys sub_nvi_trig off
-//  this identical vpos==240 transition for its own vblank-edge event
-//  (`assign sub_nvi_trig = vpos_new & (vpos == 9'd240);`) -- the same edge-detect
-//  idiom (vpos_d register + inequality compare) is reused here for consistency.
-//
-//  wdog_reset is a PULSE (not a level): held high for PULSE_CYCLES clk cycles
-//  (default 32, i.e. >1 full Z80/Z8002 cen period = clk/16, so the CEN-gated CPU
-//  cores reliably sample it) then it deasserts and the counter re-arms from 0,
-//  mirroring MAME's device_reset()->watchdog_reset() reload on machine reset. If
-//  wdog_en stays asserted and nothing ever kicks $A100 again (e.g. the CPU is
-//  hung), this free-runs into a repeating reset every 16 VBLANKs (~16 frames @
-//  ~60 Hz = ~4 Hz). PULSE_CYCLES is a judgement call, not HW-validated -- long
-//  enough to clear >1 cen period without hand-deriving exact T80/Z8002 reset
-//  timing (see vault: don't hand-simulate RTL timing). Caller ORs wdog_reset
-//  into the CPU-subsystem reset (u_pp_cpu), NOT the video pipeline or the
-//  ioctl/ROM-download reset -- see poleposition.vhd.
-//
-//  wdog_en: defeat switch, driven from Arcade-PolePosition.sv (OSD "Watchdog"
-//  toggle, status[2], default ON). The core currently hangs during self-test
-//  with no $A100 kick at the hang site; with the watchdog live that hang becomes
-//  the ~4 Hz reboot loop described above -- useful signal that something is
-//  wrong, but it turns a static, inspectable hang into a moving target. wdog_en=0
-//  holds the counter clear and wdog_reset low unconditionally so the hang can be
-//  observed without the reboot loop.
+//  pp_watchdog.sv -- Z80 watchdog ($A100): resets the CPU board after 16 un-kicked vblanks.
+//  Based on MAME polepos.cpp WATCHDOG_TIMER set_vblank_count(16) and watchdog.cpp.
+//  wdog_reset is a PULSE_CYCLES pulse into the CPU-board reset only; wdog_en = 0 disables it (OSD).
 //============================================================================
 `default_nettype none
 
@@ -82,7 +42,7 @@ module pp_watchdog #(
                 pulse_cnt <= pulse_cnt + 5'd1;
             end
         end else if (pause) begin
-            vbl_count <= 4'd0;         // PAUSE-GATE-2026-08-05: clear, don't freeze
+            vbl_count <= 4'd0;  // clear, don't freeze
         end else if (kick) begin
             vbl_count <= 4'd0;
         end else if (vblank_start) begin

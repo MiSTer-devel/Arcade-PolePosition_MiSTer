@@ -31,8 +31,7 @@ assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQM
 assign VGA_F1    = 0;
 assign VGA_SCALER= 0;
 assign USER_OUT  = '1;
-// LED_USER also latches on a Z8002 illegal opcode: the sub stops dead and
-// silently, which otherwise reads as frozen road/sprite/view buffers.
+// LED_USER also latches a Z8002 illegal opcode
 wire sub_illegal;
 assign LED_USER  = rom_download | sub_illegal;
 assign LED_DISK  = 0;
@@ -48,9 +47,7 @@ assign VGA_DISABLE = 0;
 
 wire [1:0] ar = status[20:19];
 
-// Pole Position is a HORIZONTAL (ROT0) game. Force landscape aspect; the portrait
-// branch keyed on status[2] was inherited from the Xevious (ROT90) scaffold and
-// removed. status[2] was reclaimed below for the watchdog defeat switch (wdog_en).
+// horizontal (ROT0) game: landscape aspect only
 assign VIDEO_ARX = (!ar) ? 12'd2880 : (ar - 1'd1);
 assign VIDEO_ARY = (!ar) ? 12'd2191 : 12'd0;
 
@@ -92,41 +89,14 @@ localparam CONF_STR = {
 	"O6,Service Mode,Off,On;",
 	"O7,Palette Swatch,Off,On;",
 	"R0,Reset;",
-	// 2026-08-05: 8-slot list, names + physical order copied from the MRA
-	// <buttons> element so core and MRA agree (they did not: CONF_STR had 6
-	// slots with Pause on joy[9], the MRA has 8 with Pause on joy[11]/L).
-	// Accelerate/Brake are ANALOG on the real cabinet -- digital placeholders
-	// for now (also on the D-pad); move to L2/R2 when analog input is wired.
-	// slot 4 was "Not Used" here and "-" in the MRA -- the two
-	// disagreed despite the 08-05 sync note above, and an empty slot is a mapping
-	// hazard (a placeholder that the mapper treats as absent shifts every later
-	// entry down one physical button, which is what put Coin on Y instead of
-	// Select). Slot 4 is now Service Mode = MAME IN0 bit 7 (PORT_SERVICE, the
-	// cabinet self-test toggle) on physical Y. Keep this list and the MRA
-	// <buttons> element character-for-character identical.
+	// button slots: keep identical to the MRA <buttons> list
 	"J1,Accelerate,Brake,Gear,Service Mode,Coin,Start 1P,Start 2P,Pause;",
 	"jn,A,B,X,Y,Select,Start,R,L;",
 
 	"V,v",`BUILD_DATE
 };
 
-// DIP switches, ioctl index 254 (MRA <switches>). Byte 0 = DSWA, byte 1 = DSWB.
-//
-// DSW-DIRECT-2026-08-06: the `~` inversion that used to be on ioctl_dout is GONE.
-// MAME reads both ports with NO inversion -- polepos.cpp:905-906 (53xx input<2>/<3>
-// = DSWA nibbles) and :888-889 (51xx input<0>/<1> = DSWB nibbles) -- so an MRA byte
-// now equals the MAME DSW byte exactly, and every <dip> ids list in the MRA can be
-// transcribed straight from the poleposa INPUT_PORTS table. With the inversion in
-// place each ids list had to be written back-to-front: the same "which way round"
-// trap that cost weeks on the ROM interleave map.
-//
-// NOTE the set mapping: MAME's WORLD set uses the *poleposa* port table --
-// GAME(1982, polepos, 0, polepos, poleposa, ...) at polepos.cpp:2556. Do not read
-// the `polepos` INPUT_PORTS block; its DIP bits are in the opposite order.
-//
-// Power-on values are the MAME defaults (DSWA 0xFF, DSWB 0x74) so a stale MRA with
-// no <switches> still gives 1C/1C, 90 secs, 3 laps rather than the all-zero
-// Free Play / 120 secs / 4 laps / Rank G+H that the missing block used to produce.
+// DIP switches (ioctl index 254): byte 0 = DSWA, byte 1 = DSWB, MAME polarity; power-on = MAME defaults
 reg [7:0] dsw[2];
 initial begin
 	dsw[0] = 8'hFF;
@@ -149,9 +119,7 @@ pll pll
 	.locked(pll_locked)
 );
 
-// clk_48 is a legacy scaffold name still used by the ce_pix divider + arcade_video
-// (.clk_video). This core is a single 49.152 MHz domain, so tie clk_48 to clk_sys:
-// clk_sys/8 = 49.152/8 = 6.144 MHz ce_pix = Pole Position's exact pixel clock.
+// single 49.152 MHz domain; clk_48 is the legacy video-clock name
 assign clk_48 = clk_sys;
 
 ///////////////////////////////////////////////////
@@ -173,8 +141,8 @@ wire  [7:0] ioctl_din;
 wire  [7:0] ioctl_index;
 
 wire [15:0] joystick_0, joystick_1;
-wire [15:0] joystick_l_analog_0;   // STEERING-2026-09-23: analog wheel/stick (X = [7:0], signed)
-wire [15:0] joystick_r_analog_0;   // PEDALS-2026-09-23: optional pedal axis (Y = [15:8], signed)
+wire [15:0] joystick_l_analog_0;  // analog wheel / stick X
+wire [15:0] joystick_r_analog_0;  // optional pedal axis Y
 wire  [8:0] spinner_0;
 wire  [7:0] paddle_0;
 wire [24:0] ps2_mouse;
@@ -255,16 +223,7 @@ wire m_right1 = joystick_0[0]  | key_p1_right;
 wire m_left1  = joystick_0[1]  | key_p1_left;
 wire m_down1  = joystick_0[2]  | key_p1_down;
 wire m_up1    = joystick_0[3]  | key_p1_up;
-// wire m_accelerate1 = joystick_0[4];
-// wire m_break1 = joystick_0[5];
-// GEAR-TOGGLE-2026-08-09: the shifter is a LATCHING switch, not a momentary button.
-// MAME polepos.cpp:503 declares it PORT_BIT(0x02,...,IPT_BUTTON3) POLEPOS_TOGGLE, and
-// :252 is `#define POLEPOS_TOGGLE PORT_TOGGLE` -- each press flips Lo<->Hi and it HOLDS.
-// Passing the raw button straight through meant the core only saw the gear changed for
-// as long as the button was physically held, so it always sprang back to Lo.
-// Powers up 0 = Lo (matches MAME's PORT_TOGGLE off state -> in0_byte bit1 reads 1,
-// inactive on the active-low IN0). Not reset-gated: `reset` is declared further down
-// this file, and power-on init already lands in Lo.
+// gear shifter is a latching toggle (MAME PORT_TOGGLE); powers up in Lo
 wire m_gear_btn = joystick_0[6] | key_p1_fire | key_p1_bomb;
 reg  m_gear_btn_d = 1'b0;
 reg  m_gear1      = 1'b0;
@@ -272,24 +231,15 @@ always @(posedge clk_sys) begin
 	m_gear_btn_d <= m_gear_btn;
 	if (m_gear_btn & ~m_gear_btn_d) m_gear1 <= ~m_gear1;   // flip on press (rising edge)
 end
-// joystick_0[7] was NOT USED. It is now Service Mode (MRA /
-// CONF_STR slot 4, physical Y) = MAME IN0 bit 7, PORT_SERVICE -- the cabinet's
-// self-test toggle. On the real machine this is a SWITCH, so the game samples it
-// continuously: HOLD the button to stay in test mode. OR'd with the existing OSD
-// toggle (status[6], "Service Mode" in CONF_STR) so it can also be latched from
-// the menu. poleposition.vhd inverts it into in0_byte bit7 (active-low on IN0).
+// Service Mode (self-test switch, IN0 bit 7): button or OSD toggle
 wire m_service_mode = joystick_0[7];
 wire m_coin1  = joystick_0[8]  | key_coin1;
 wire m_start1 = joystick_0[9]  | key_start1;
-// joystick_1[9] is P2's own Start button (MRA slot 6 on the second pad); it means
-// the same thing as P1 pressing slot 7 'Start 2P', so both feed m_start2.
+// P2 Start doubles as Start 2P
 wire m_start2 = joystick_0[10] | joystick_1[9] | key_start2;
 wire m_pause  = joystick_0[11];
 
 wire m_coin2  = joystick_1[8]  | key_coin2;
-// The joystick_1 copies of m_start1/m_start2/m_pause that used to sit here were
-// duplicate declarations of the joystick_0 ones above (Quartus error 10149).
-// P2's Start is folded into m_start2 above; Pause is a single global control.
 
 // PAUSE SYSTEM
 wire				pause_cpu;
@@ -307,17 +257,12 @@ wire rde, rhs, rvs;
 wire [3:0] r,g,b;
 wire [11:0] rgb_out;
 
-// The core emits pixels on its OWN enable (ce_vid = poleposition.video_en =
-// ena_vidgen, the gen_video/renderer pixel-slot machine). arcade_video MUST sample
-// on that same enable — an independent free-running clk/8 sampler disagrees with the
-// slot machine's non-uniform cadence and double-taps/drops pixels ("2x fat / half
-// char"). ce_vid was declared+driven but left orphaned; wire it straight through.
+// arcade_video samples on the core's own pixel enable
 wire ce_pix = ce_vid;
 
 wire flip_screen = status[8];
 wire rotate_ccw = flip_screen;
-// Pole Position is horizontal (ROT0) — never rotate the framebuffer. The Xevious
-// scaffold defaulted to Vert (status[2]=0 -> rotated); that toggle is now removed.
+// never rotate (ROT0)
 wire no_rotate = 1'b1;
 wire video_rotated;
 wire flip = 0;
@@ -340,7 +285,7 @@ arcade_video #(256,12) arcade_video
 	.*,
 
 	.clk_video(clk_48),
-	.RGB_in(rgb_shifted),   // VIDSHIFT-2026-08-16 (was rgb_out)
+	.RGB_in(rgb_shifted),
 	.HBlank(hblank),
 	.VBlank(vblank),
 	.HSync(hs),
@@ -352,8 +297,6 @@ arcade_video #(256,12) arcade_video
 wire [15:0] audio;
 assign AUDIO_L = audio;
 assign AUDIO_R = AUDIO_L;
-// `audio` is the Namco WSG mixer's signed two's-complement sum (namco_wsg8.sv,
-// MAME namco.cpp mixing math) -- was 0 (arbitrary) while audio was tied off.
 assign AUDIO_S = 1;
 
 wire service, service_r, service_trigger;
@@ -365,30 +308,22 @@ end
 
 wire rom_download = ioctl_download & !ioctl_index;
 
-// MRA mod byte, ioctl index 7 offset 0. bit0 = enable the PP2 IC25 custom.
-// Absent from an MRA leaves it 0, which is correct for PP1 and polepos2b.
+// MRA mod byte (ioctl index 7): bit0 PP2 IC25 custom, bit1 bootleg I/O board, bit2 bootleg speech board
 reg [7:0] pp_mod = 8'd0;
 always @(posedge clk_sys) begin
 	if (ioctl_wr && (ioctl_index == 8'd7) && (ioctl_addr == 25'd0))
 		pp_mod <= ioctl_dout;
 end
 wire ic25_en = pp_mod[0];
-// Per vault Common-Pitfalls/"Core reset must include ioctl_download": hold the core
-// in reset for the WHOLE multi-index PP download (ioctl_download, not just index-0
-// rom_download), + ~pll_locked as the next-line cold-boot defense.
+wire bootleg_io = pp_mod[1];
+wire bootleg_snd = pp_mod[2];
+// hold reset for the whole multi-index download
 wire reset = RESET | status[0] | buttons[1] | ioctl_download | ~pll_locked | service_trigger | key_reset;
 
-// Watchdog defeat switch (rtl/pp_watchdog.sv wdog_en, MAME polepos.cpp:925
-// set_vblank_count(...,16)). status[2]=0 (default) -> watchdog ON, matching MAME;
-// status[2]=1 -> OFF. See "O2,Watchdog,On,Off;" above and pp_watchdog.sv header
-// for why a one-place defeat switch exists (self-test hang -> ~4Hz reboot loop
-// with the watchdog live, which is useful signal but hampers on-screen diagnosis).
+// watchdog enable (OSD, default on, MAME polepos.cpp set_vblank_count 16)
 wire wdog_en = ~status[2];
 
-// INCR-1a (DIAG-REVERT-2026-07-13): chars (alpha) gfx ROM. MAME polepos "chars" =
-// ioctl INDEX 1, offset 0x0000, 0x1000 bytes (pp3_28.1f, crc 2e77187e). ioctl write
-// gate per vault: index==1 & addr<0x1000; write addr region-relative (ioctl_addr
-// resets to 0 at each index). Sync 1-clk read feeds the alpha renderer's gfx port.
+// alpha chars ROM: ioctl index 1, 0x0000-0x0FFF
 wire [12:0] chars_gfx_addr;
 reg  [7:0]  chars_gfx_data;
 reg  [7:0]  chars_rom [0:8191];
@@ -428,31 +363,20 @@ end
 wire [16:0] sprgfx_addr;
 reg  [7:0]  sprgfx_data;
 reg  [7:0]  sprite_rom [0:81919];  // 0x14000
-// Index-1 stream, padded to MAME's declared region sizes so one gate set serves
-// PP1 and PP2. Must match IDX1_PAD in verilator/survey/mra_emit.py:
-//   chars 0x00000 | tiles 0x02000 | sprites 0x04000 | bigsprites 0x08000
-//   road  0x18000 | scalelut 0x1D000                        end 0x1E000
-// bigsprites keeps MAME's internal 0x2000 gap at sprite_rom[0xA000-0xBFFF].
+// index-1 stream padded to MAME region sizes (one gate set for PP1 and PP2), see mra_emit.py IDX1_PAD:
+//   chars 0x00000 | tiles 0x02000 | sprites 0x04000 | bigsprites 0x08000 | road 0x18000 | scalelut 0x1D000
 wire        sprite_wr = ioctl_wr & (ioctl_index == 8'd1) & (ioctl_addr >= 25'h4000) & (ioctl_addr < 25'h18000);
 always @(posedge clk_sys) begin
 	if (sprite_wr) sprite_rom[ioctl_addr - 25'h4000] <= ioctl_dout;
 	sprgfx_data <= sprite_rom[sprgfx_addr];
 end
 
-// Palette PROMs — ioctl INDEX 2, offset 0x000-0xFFF (R@0x000 G@0x100 B@0x200
-// alpha@0x300 view@0x400 vpos-mod@0x500/600/700 road@0x800 sprite@0xC00). Each
-// palette/generator decodes prom_addr[11:8] or [11:10]. Region-relative addr.
+// palette PROMs: ioctl index 2, 0x000-0xFFF
 wire        pp_prom_wr   = ioctl_wr & (ioctl_index == 8'd2) & (ioctl_addr < 25'h1000);
 wire [11:0] pp_prom_addr = ioctl_addr[11:0];
 wire [7:0]  pp_prom_data = ioctl_dout;
 
-// Namco WSG waveform PROM — ioctl INDEX 2, region-relative 0x1040-0x113F (256
-// bytes, right after the 0x1040-byte "proms" block; MAME polepos "namco"
-// region, pp1-5.3b crc 8568decc; 8 waveforms x 32 4-bit samples). 0x1040 isn't
-// power-of-2-aligned, so the relative address needs an actual subtract (NOT a
-// plain bit-slice like pp_prom_addr above) — 8-bit unsigned wraparound still
-// gives the correct 0-255 result across the bit-8 boundary inside the region
-// (modular arithmetic: (A-B) mod 256 only depends on A,B mod 256).
+// WSG waveform PROM: ioctl index 2, 0x1040-0x113F (unaligned: subtract, 8-bit wrap is correct)
 wire        wsg_prom_wr   = ioctl_wr & (ioctl_index == 8'd2) & (ioctl_addr >= 25'h1040) & (ioctl_addr < 25'h1140);
 wire [7:0]  wsg_prom_addr = ioctl_addr[7:0] - 8'h40;
 wire [7:0]  wsg_prom_data = ioctl_dout;
@@ -470,11 +394,7 @@ always @(posedge clk_sys) begin
 	sample52_data <= sample52_rom[sample52_addr];
 end
 
-// Engine sound waveform ROM — ioctl index 5, region-relative 0x0000-0x3FFF
-// (pp1_15.6a + pp1_16.5a, MAME's "engine" region). ENGINE-SOUND-2026-08-06:
-// the MRA has always downloaded this slice; before now nothing claimed it and
-// it was dropped on the floor. 8 slots x 0x800 bytes, addressed by
-// pp_engine_snd as {slot, index}.
+// engine waveform ROM: ioctl index 5, 0x0000-0x3FFF (8 slots x 0x800)
 wire [13:0] engine_addr;
 reg  [7:0]  engine_data;
 reg  [7:0]  engine_rom [0:16383]; // 0x4000
@@ -484,23 +404,7 @@ always @(posedge clk_sys) begin
 	engine_data <= engine_rom[engine_addr];
 end
 
-// Steering (MAME "STEER" IPT_DIAL) — no real spinner/analog input is wired at
-// this top level yet (#unverified / KNOWN ITERATION POINT). Placeholder: a
-// digital up/down counter driven by m_left1/m_right1 (both otherwise DEAD in
-// this Namco scaffold's entity, per poleposition.vhd's gutted CPU section) so
-// the 53xx's steering_changed/delta logic has SOMETHING to react to for a
-// first HW bring-up. Swap for a real spinner/paddle mapping later.
-// STEERING-2026-09-23: replaced by pp_steering (spinner / mouse / analog wheel / paddle / D-pad).
-// Original D-pad-only counter below.
-// reg [15:0] steer_div;
-// reg  [7:0] steer_pos = 8'h80;
-// always @(posedge clk_sys) begin
-// 	steer_div <= steer_div + 1'b1;
-// 	if (steer_div == 16'd0) begin  // clk_sys(49.152MHz)/65536 ~= 750 Hz update rate
-// 		if (m_left1  & ~m_right1) steer_pos <= steer_pos - 1'b1;
-// 		if (m_right1 & ~m_left1)  steer_pos <= steer_pos + 1'b1;
-// 	end
-// end
+// steering: spinner / mouse / analog wheel / paddle / D-pad
 wire [7:0] steer_pos;
 pp_steering pp_steering
 (
@@ -518,24 +422,7 @@ pp_steering pp_steering
 	.steer_pos   (steer_pos)
 );
 
-// ADC0804 accelerator/brake pedal inputs (rtl/adc0804.sv via poleposition.vhd's
-// accel_in/brake_in ports) — DIGITAL PLACEHOLDER, no real analog/pedal input is
-// wired at this top level yet (#unverified / KNOWN ITERATION POINT, same status
-// as steer_pos above). up1/down1 double as full-on/off accel/brake so the ADC
-// path has SOMETHING to convert for first HW bring-up; m_gear1 carries the Gear
-// Change input (IN0 bit1, see poleposition.vhd in0_byte), which is why up/down
-// were chosen here instead. Full scale is 0x90, NOT 0xFF, per MAME
-// PORT_MINMAX(0,0x90) on both ACCEL and BRAKE. Swap for real pedal mapping later.
-// Accept the MRA's Accelerate/Brake buttons (slots 1/2 = A/B) as well as the
-// existing D-pad placeholder. Both are digital until analog input is wired.
-// PEDALS-2026-09-23: OSD "Pedals" = Analog reads one combined axis (up = accelerate, down = brake),
-// |Y| 0..128 -> 0..0x90 (MAME PORT_MINMAX(0,0x90)) with a dead zone. The Accelerate/Brake buttons still
-// force full pedal; the D-pad is dropped in analog mode because MiSTer also reports the stick as D-pad.
-// Original digital-only mapping below.
-// wire m_accel1 = m_up1   | joystick_0[4];
-// wire m_brake1 = m_down1 | joystick_0[5];
-// wire [7:0] pp_accel = m_accel1 ? 8'h90 : 8'h00;
-// wire [7:0] pp_brake = m_brake1 ? 8'h90 : 8'h00;
+// pedals (ADC, full scale 0x90): Accelerate/Brake buttons or D-pad; OSD analog mode reads one stick axis (up = gas)
 wire       pedal_analog = status[9];
 wire       m_accel1 = (pedal_analog ? 1'b0 : m_up1)   | joystick_0[4];
 wire       m_brake1 = (pedal_analog ? 1'b0 : m_down1) | joystick_0[5];
@@ -546,8 +433,18 @@ wire [15:0] pedal_scl   = {8'd0, pedal_mag} * 16'd144;                       // 
 wire [7:0] pedal_lvl    = (pedal_mag < 8'd8) ? 8'h00 : pedal_scl[14:7];       // dead zone ~6%
 wire [7:0] ana_accel    = (pedal_analog && pedal_y[8])  ? pedal_lvl : 8'h00;  // up (negative Y)
 wire [7:0] ana_brake    = (pedal_analog && !pedal_y[8]) ? pedal_lvl : 8'h00;  // down
-wire [7:0] pp_accel = m_accel1 ? 8'h90 : ana_accel;
-wire [7:0] pp_brake = m_brake1 ? 8'h90 : ana_brake;
+// digital pedals ramp +16/frame like MAME's keyboard pedal: the PP2 bootlegs only start while gas reads $40-$7F
+reg  [7:0] dig_accel = 8'h00, dig_brake = 8'h00;
+reg        pedal_vb_d;
+always @(posedge clk_sys) begin
+	pedal_vb_d <= vblank;
+	if (vblank & ~pedal_vb_d) begin
+		dig_accel <= !m_accel1 ? 8'h00 : (dig_accel >= 8'h80) ? 8'h90 : dig_accel + 8'd16;
+		dig_brake <= !m_brake1 ? 8'h00 : (dig_brake >= 8'h80) ? 8'h90 : dig_brake + 8'd16;
+	end
+end
+wire [7:0] pp_accel = m_accel1 ? dig_accel : ana_accel;
+wire [7:0] pp_brake = m_brake1 ? dig_brake : ana_brake;
 
 poleposition poleposition
 (
@@ -560,6 +457,8 @@ poleposition poleposition
 	.dn_data(ioctl_dout),
 	.dn_wr(ioctl_wr & rom_download),
 	.ic25_en(ic25_en),
+	.bootleg_io(bootleg_io),
+	.bootleg_snd(bootleg_snd),
 
 	.gfx_addr(chars_gfx_addr),
 	.gfx_data(chars_gfx_data),
@@ -600,20 +499,19 @@ poleposition poleposition
 	.flip(flip_screen),
 	.h_offset(status[27:22]),
 	.v_offset(status[31:28]),
-	.diag_swatch(status[7]),          // DIAG-REVERT-2026-08-16
+	.diag_swatch(status[7]),
 
 	.audio(audio),
 
 	.self_test(status[6] | m_service_mode),
 
-	// NOTE: `service` is MAME IN0 bit 6 = IPT_SERVICE1, the service-CREDIT button --
-	// a DIFFERENT control from the self-test switch above. Still keyboard-only (9).
+	// service = IN0 bit 6 service credit (keyboard 9), not the self-test switch
 	.service(key_service),
 	.coin1(m_coin1),
 	.coin2(m_coin2),
 	.start1(m_start1),
 	.start2(m_start2),
-	.fire1(m_gear1),      // scaffold port name; carries Gear Change -> in0_byte bit1
+	.fire1(m_gear1),  // Gear Change -> IN0 bit 1
 
 	.dip_switch_a(dsw[0]),
 	.dip_switch_b(dsw[1]),
@@ -634,11 +532,10 @@ poleposition poleposition
 	.hs_write(hs_write_enable)
 );
 
-
 // HISCORE SYSTEM
 // --------------
 
-wire [10:0]hs_address;   // HISCORE-NVRAM-2026-09-20: was [11:0]; both ends are 11-bit (2 KB NVRAM)
+wire [10:0]hs_address;
 wire [7:0] hs_data_in;
 wire [7:0] hs_data_out;
 wire hs_write_enable;
@@ -647,14 +544,7 @@ wire hs_configured;
 
 hiscore #(
 	.HS_ADDRESSWIDTH(11),          // 2 KB NVRAM, Z80 $3000-$37FF (2048 >= $7F2)
-	.HS_SCOREWIDTH(11),            // HISCORE-SCOREWIDTH-2026-09-20: capture buffer must
-	                               // hold the WHOLE range. Default 8 = 256 bytes, but our
-	                               // entry is $7F2 = 2034 bytes: buffer_addr (HS_SCOREWIDTH
-	                               // wide) wraps at 255 while compare_length counts to 2034,
-	                               // so hiscore.v:526 `buffer_addr == compare_length` NEVER
-	                               // matches and the extract never completes -> no save.
-	                               // Tutankham/Pacman omit this because their ranges are
-	                               // 45/66 bytes; ours is the first to exceed 256.
+	.HS_SCOREWIDTH(11),  // capture buffer must cover the whole 2034-byte range
 	.CFG_ADDRESSWIDTH(2),          // 4 entries max; we use 1
 	.CFG_LENGTHWIDTH(2)            // 16-bit length ($7F2)
 ) hi (

@@ -2,20 +2,7 @@
 -- Pole Position (adapted from Xevious) by Dar (darfpga@aol.fr)
 -- http://darfpga.blogspot.fr
 ---------------------------------------------------------------------------------
--- 2026-07-13 STEP-3 GUT: the Xevious 3-Z80 muxed-bus CPU section + the entire
--- Xevious video pipeline (fg/bg/sprite fetch, palettes, terrain, sound_machine,
--- mb88 5xxx) were REMOVED and replaced by PolePosition_CPU (Z80 + 2x Z8002 +
--- shared VRAM). Only gen_video (H/V timing) + the free-running pixel-slot machine
--- (ena_vidgen) survive from the original. Old code is recoverable from git.
---
--- STATUS 2026-08-06 (the 07-13 note above said sound/view/sprites/road/palette/
--- the Namco 5xxx bus were "NOT wired yet" and the renderer was pp_alpha_bringup;
--- all of that is long obsolete, so it is corrected here rather than left to
--- mislead): the renderer is pp_video_composite (alpha + view + road + sprites),
--- the 06xx bus with 51xx/52xx/53xx/54xx is live, and audio is namco_wsg8 mixed
--- with pp_engine_snd. VOICE52-2026-08-11: the 52xx's analog "discrete" output is
--- now modelled too (pp_voice52_snd.sv), so voice samples are audible. Still
--- absent: the 54xx analog "discrete" outputs (crash/explosion noise).
+-- Pole Position / Pole Position II: CPU board, Namco 06xx + 51xx..54xx, sound, video.
 ---------------------------------------------------------------------------------
 -- Educational use only. Do not redistribute synthetized file with roms.
 ---------------------------------------------------------------------------------
@@ -30,9 +17,7 @@ port(
  clock_18       : in std_logic;
  reset          : in std_logic;
 
- -- watchdog defeat switch (rtl/pp_watchdog.sv wdog_en). 1 = watchdog live
- -- (MAME polepos.cpp:925 set_vblank_count(...,16)), 0 = permanently disabled.
- -- Driven from Arcade-PolePosition.sv's OSD "Watchdog" toggle, default ON.
+ -- watchdog enable (OSD); 0 = disabled
  wdog_en        : in std_logic;
 
  sub_illegal    : out std_logic;
@@ -41,8 +26,12 @@ port(
  dn_data        : in  std_logic_vector(7 downto 0);
  dn_wr          : in  std_logic;
 
- -- PP2 IC25 protection overlay enable (MRA mod byte, index 7 bit 0).
+ -- PP2 IC25 protection custom (MRA mod byte bit 0)
  ic25_en        : in  std_logic;
+ -- bootleg I/O board, machine topracern / polepos2bi (MRA mod byte bit 1)
+ bootleg_io     : in  std_logic;
+ -- bootleg speech board, sound Z80 + TMS5220 (MRA mod byte bit 2)
+ bootleg_snd    : in  std_logic;
 
  gfx_addr       : out std_logic_vector(12 downto 0);
  gfx_data       : in  std_logic_vector(7 downto 0);
@@ -57,15 +46,11 @@ port(
  sprgfx_addr    : out std_logic_vector(16 downto 0);
  sprgfx_data    : in  std_logic_vector(7 downto 0);
 
- -- namco_52xx sample ("voice") ROM (ioctl index 5, region-relative 0x4000-0xBFFF,
- -- 0x8000 bytes -- the "engine" slice 0x0000-0x3FFF is a separate, still-unbuilt
- -- device and not wired here). rtl/namco/namco_52xx.sv drives addr from its
- -- internal O/R2/R3-port-built address register.
+ -- 52xx voice ROM (ioctl index 5 +0x4000, 0x8000 bytes)
  sample52_addr  : out std_logic_vector(14 downto 0);
  sample52_data  : in  std_logic_vector(7 downto 0);
 
- -- ENGINE-SOUND-2026-08-06: engine ("car") sound waveform ROM, ioctl index 5
- -- region-relative 0x0000-0x3FFF (MAME "engine" region, 8 slots x 0x800).
+ -- engine waveform ROM (ioctl index 5, 0x0000-0x3FFF)
  engine_addr    : out std_logic_vector(13 downto 0);
  engine_data    : in  std_logic_vector(7 downto 0);
 
@@ -74,8 +59,7 @@ port(
  prom_addr      : in  std_logic_vector(11 downto 0);
  prom_data      : in  std_logic_vector(7 downto 0);
 
- -- Namco WSG waveform PROM load (ioctl index 2, region-relative 0x1040-0x113F;
- -- top level pre-adjusts to a plain 0-255 address -- see namco_wsg8.sv header)
+ -- WSG waveform PROM (ioctl index 2)
  wsg_prom_wr    : in  std_logic;
  wsg_prom_addr  : in  std_logic_vector(7 downto 0);
  wsg_prom_data  : in  std_logic_vector(7 downto 0);
@@ -107,31 +91,21 @@ port(
  coin1          : in std_logic;
 
  start1         : in std_logic;
- -- fire1 is the real Gear Change input (MAME IN0 bit 0x02) -- see in0_byte below.
+ -- fire1 = Gear Change
  fire1          : in std_logic;
 
  coin2          : in std_logic;
  start2         : in std_logic;
 
-
  pause          : in std_logic;
 
- -- STEP-3b-2: Namco 06xx bus + 51xx/53xx I/O MCU wiring. steer_in is a raw
- -- 8-bit dial reading (MAME m_steer_io->read()); Arcade-PolePosition.sv has
- -- no real spinner/analog input wired yet, so it currently feeds a digital
- -- left/right placeholder counter (see that file). mcu_rom_* loads the mb88
- -- internal ROMs (ioctl index 6: 51xx@0x000 53xx@0x400 54xx@0x800, each
- -- 0x400) -- mirrors the chars_rom/pp_prom load pattern in the top file.
+ -- steer_in: steering dial; mcu_rom_*: MB88 ROMs (ioctl index 6: 51xx 0x000, 53xx 0x400, 54xx 0x800)
  steer_in       : in  std_logic_vector(7 downto 0);
  mcu_rom_wr     : in  std_logic;
  mcu_rom_addr   : in  std_logic_vector(11 downto 0);
  mcu_rom_data   : in  std_logic_vector(7 downto 0);
 
- -- ADC0804 (rtl/adc0804.sv) accelerator/brake pedal inputs (MAME "ACCEL"/"BRAKE"
- -- analog ports, PORT_MINMAX(0,0x90)). Selected onto adc_vin by gasel_w below
- -- (MAME polepos.h m_analog_io{"BRAKE","ACCEL"}: gasel=0->BRAKE, gasel=1->ACCEL).
- -- Arcade-PolePosition.sv currently drives these from a digital up/down
- -- placeholder (no real pedal/analog input wired at the top level yet).
+ -- ADC accelerator / brake inputs (MAME ACCEL / BRAKE, 0..0x90)
  accel_in       : in  std_logic_vector(7 downto 0);
  brake_in       : in  std_logic_vector(7 downto 0);
 
@@ -177,10 +151,7 @@ architecture struct of poleposition is
  signal cpu_rom_wr    : std_logic;
  signal cpu_ioctl_addr: std_logic_vector(24 downto 0);
 
- -- watchdog (rtl/pp_watchdog.sv): watchdog_wr_w = Z80 $A100 kick (u_pp_cpu
- -- watchdog_wr, was `open`); wdog_reset_w = pulse OR'd into the CPU-subsystem
- -- reset ONLY (cpu_reset_w), never the video/ioctl reset. See pp_watchdog.sv
- -- header for the MAME citation + vblank-line source.
+ -- watchdog: Z80 $A100 kick; its reset pulse goes to the CPU board only
  signal watchdog_wr_w : std_logic;
  signal wdog_reset_w  : std_logic;
  signal cpu_reset_w   : std_logic;
@@ -190,8 +161,6 @@ architecture struct of poleposition is
  signal zero10 : std_logic_vector(9 downto 0);
  signal zero11 : std_logic_vector(10 downto 0);
 
- -- STEP-3b-2: Namco 06xx bus + 51xx/53xx (rtl/namco_06xx.sv, namco_51xx.sv,
- -- namco_53xx.sv). u_pp_cpu's n06_* ports were open/zero8 tie-offs; now real.
  signal n06_dout_w     : std_logic_vector(7 downto 0);
  signal n06_data_wr_w  : std_logic;
  signal n06_data_rd_w  : std_logic;
@@ -200,9 +169,9 @@ architecture struct of poleposition is
  signal n06_din_w      : std_logic_vector(7 downto 0);
  signal n06_nmi_n_w    : std_logic;
 
- signal sb0_w          : std_logic;                     -- LS259 q6 (auto_start_mask = not sb0)
- signal namco_reset_w  : std_logic;                     -- LS259 q1 (51xx/53xx/54xx reset, MAME reset(state))
- signal chacl_w        : std_logic;                     -- LS259 q7 (alpha layer enable color+msb, polepos_v.cpp:159-166)
+ signal sb0_w          : std_logic;  -- LS259 q6
+ signal namco_reset_w  : std_logic;  -- LS259 q1: Namco MCU reset
+ signal chacl_w        : std_logic;  -- LS259 q7: alpha layer enable
  signal mcu_reset_n    : std_logic;                     -- = not reset AND namco_reset_w
 
  signal n06_chipsel    : std_logic_vector(3 downto 0);
@@ -211,39 +180,35 @@ architecture struct of poleposition is
  signal n06_chip_wr    : std_logic_vector(3 downto 0);
  signal chip0_din      : std_logic_vector(7 downto 0);   -- 51xx read() -> 06xx data_r
  signal chip1_din      : std_logic_vector(7 downto 0);   -- 53xx read() -> 06xx data_r
- signal chip23_din     : std_logic_vector(7 downto 0);   -- 52xx/54xx unbuilt: reads as 0xFF (MAME devcb default)
+ signal chip23_din     : std_logic_vector(7 downto 0);  -- 52xx/54xx: no read, 0xFF
 
- -- IN0 (MAME polepos.cpp PORT_START("IN0"), z80_map via 51xx input<2>/<3>):
- --   bit7=self_test bit6=service1 bit5=coin2 bit4=coin1 bit3=unused
- --   bit2=auto_start(=not sb0, program-controlled, NOT a physical input)
- --   bit1=Gear Change (BUTTON3; fire1 repurposed -- was dead in this Namco
- --        scaffold, no accel/brake/gear ports exist yet at the top level)
- --   bit0=unused
+ -- IN0 (active low): b7 test, b6 service, b5 coin2, b4 coin1, b2 auto start (sb0 loopback), b1 gear
  signal in0_byte       : std_logic_vector(7 downto 0);
+ signal bl_in0_byte    : std_logic_vector(7 downto 0);
+ signal in0_51xx       : std_logic_vector(7 downto 0);
+ signal dswb_51xx      : std_logic_vector(7 downto 0);
+ signal chip1_din_06   : std_logic_vector(7 downto 0);
+ signal n06_chipsel_g  : std_logic_vector(3 downto 0);
+ signal n06_chip_wr_g  : std_logic_vector(3 downto 0);
+ signal bl_dac_w       : std_logic_vector(3 downto 0);
+ signal bl_latch_w     : std_logic_vector(7 downto 0);
+ signal bl_latch_wr_w  : std_logic;
+ signal bl_dac_s       : signed(17 downto 0);
+ signal bl_off_n       : std_logic;
+ signal n52_sample_addr : std_logic_vector(14 downto 0);
+ signal bs_rom_addr     : std_logic_vector(14 downto 0);
+ signal bs_audio_w      : std_logic_vector(15 downto 0);
+ signal bs_gain_s       : signed(24 downto 0);
+ signal bs_audio_s      : signed(17 downto 0);
+ signal bs_reset        : std_logic;
+ signal bs_latch_wr     : std_logic;
 
- -- Namco 5xxx MCU clock enable = clock_18/32 = 1.536 MHz (MAME MASTER_CLOCK/8/2),
- -- derived from the existing cen (clock_18/16, the Z80/Z8002 CE) by toggling once
- -- more per cen pulse.
+ -- Namco MCU clock enable: cen/12 = 256 kHz, the MB88 machine-cycle rate (1.536 MHz pin clock / 6)
  signal mcu_div : std_logic := '0';
- -- MCU-DIV6-2026-08-11: A/B SWITCH #2. `cen` is 3.072 MHz. The old divider gave
- -- mcu_ena = cen/2 = 1.536 MHz, which is the MB88's *PIN* clock. But mb88_core
- -- retires a 1-byte instruction per `ena` pulse, while mb88xx.h:125-126 charges
- -- it one MACHINE cycle = 6 pin clocks -- so all four Namco MCUs have been
- -- running ~6x too fast. Correct machine-cycle rate = 1.536/6 = 256 kHz = cen/12.
- --   MCU_CEN_DIV = 12  -> MAME-correct 256 kHz
- --   MCU_CEN_DIV =  2  -> the pre-2026-08-11 behaviour (restore with this one edit)
- -- NOTE: Kangaroo drives the same core at its raw 2.5 MHz Z80 enable and works,
- -- so a missing /6 is not automatically fatal -- it should only bite where the
- -- MCU is in a tight handshake with the CPU, i.e. the 51xx reply burst.
- -- 2026-08-11 build #2: set to 12 (MAME-correct 256 kHz machine-cycle rate) now
- -- that HOLD_MODE = 1 is HW-CONFIRMED as the controls fix and is the established
- -- baseline. This build therefore still isolates ONE variable.
  constant MCU_CEN_DIV : integer := 12;
  signal mcu_div_cnt : integer range 0 to 15 := 0;
  signal mcu_ena : std_logic;
 
- -- Namco WSG (8-voice, rtl/namco_wsg8.sv). u_pp_cpu's sound_en/wsg_* ports
- -- were open/zero8 tie-offs; now real (see u_wsg instance + wiring below).
  signal sound_en_w  : std_logic;
 
  signal engine_dout_w   : std_logic_vector(7 downto 0);
@@ -258,22 +223,35 @@ architecture struct of poleposition is
  signal n54_r1_w        : std_logic_vector(3 downto 0);
  signal noise_audio_w   : std_logic_vector(15 downto 0);
  signal audio_mix_s     : signed(17 downto 0);
- signal wsg_gain_s      : signed(24 downto 0);   -- AUDIO-MIX-2026-09-23: WSG * MAME route 0.80
- signal voice_gain_s    : signed(24 downto 0);   -- AUDIO-MIX-2026-09-23: 52xx * MAME discrete route 0.90
+ signal wsg_gain_s      : signed(24 downto 0);  -- x0.80
+ signal voice_gain_s    : signed(24 downto 0);  -- x0.90
  signal wsg_addr_w  : std_logic_vector(5 downto 0);
  signal wsg_dout_w  : std_logic_vector(7 downto 0);
  signal wsg_wr_w    : std_logic;
  signal wsg_din_w   : std_logic_vector(7 downto 0);
 
- -- ADC0804 (rtl/adc0804.sv). u_pp_cpu's gasel/adc_* ports were open/tied-off
- -- (gasel => open, adc_wr/adc_rd => open, adc_din => zero8, adc_intr_n => '1');
- -- now real (see u_adc instance + wiring below).
- signal gasel_w      : std_logic;                     -- LS259 q3, 0=BRAKE 1=ACCEL
+ signal gasel_w      : std_logic;  -- LS259 q3: 0 = brake, 1 = accel
  signal adc_wr_w     : std_logic;
  signal adc_rd_w     : std_logic;
  signal adc_din_w    : std_logic_vector(7 downto 0);
  signal adc_intr_n_w : std_logic;
  signal adc_vin_w    : std_logic_vector(7 downto 0);
+
+ component pp_bootleg_snd
+ port(
+   clk           : in  std_logic;
+   cen           : in  std_logic;
+   reset         : in  std_logic;
+   pause         : in  std_logic;
+   latch_wr      : in  std_logic;
+   latch_din     : in  std_logic_vector(7 downto 0);
+   rom_addr      : out std_logic_vector(14 downto 0);
+   rom_data      : in  std_logic_vector(7 downto 0);
+   audio         : out std_logic_vector(15 downto 0);
+   tms_wr_data   : out std_logic_vector(7 downto 0);
+   tms_wr_strobe : out std_logic
+ );
+ end component;
 
  component namco_06xx
  port(
@@ -367,9 +345,7 @@ architecture struct of poleposition is
  );
  end component;
 
- -- ENGINE-SOUND-2026-08-06: rtl/pp_engine_snd.sv (MAME polepos_a.cpp
- -- polepos_sound_device). Instantiated via a VHDL component declaration, the
- -- proven Q17 VHDL<-SystemVerilog path used by every other SV peripheral here.
+ -- engine sound
  component pp_engine_snd
  port(
    clk       : in  std_logic;
@@ -385,8 +361,7 @@ architecture struct of poleposition is
  );
  end component;
 
- -- rtl/sound/pp_voice52_snd.sv (MAME polepos_a.cpp CHANL4).
- -- Takes the 52xx's 4-bit PCM output pins and does DAC + filter + level.
+ -- 52xx voice analog stage
  component pp_voice52_snd
  port(
    clk       : in  std_logic;
@@ -397,8 +372,7 @@ architecture struct of poleposition is
  );
  end component;
 
- -- rtl/sound/pp_noise54_snd.sv (MAME polepos_a.cpp
- -- CHANL1/2/3). Three 4-bit levels from the 54xx -> DAC + bandpass -> one mix.
+ -- 54xx noise analog stage
  component pp_noise54_snd
  port(
    clk       : in  std_logic;
@@ -416,7 +390,7 @@ architecture struct of poleposition is
    clk       : in  std_logic;
    reset     : in  std_logic;
    sound_en  : in  std_logic;
-   pause     : in  std_logic;   -- PAUSE-GATE-2026-08-05
+   pause     : in  std_logic;
    reg_addr  : in  std_logic_vector(5 downto 0);
    reg_din   : in  std_logic_vector(7 downto 0);
    reg_wr    : in  std_logic;
@@ -447,7 +421,7 @@ architecture struct of poleposition is
    hpos            : in  std_logic_vector(8 downto 0);
    vpos            : in  std_logic_vector(8 downto 0);
    chacl           : in  std_logic;
-   diag_swatch     : in  std_logic;   -- DIAG-REVERT-2026-08-16: palette swatch overlay
+   diag_swatch     : in  std_logic;  -- palette swatch overlay
    alpha_scan_addr : out std_logic_vector(10 downto 0);
    alpha_scan_dout : in  std_logic_vector(15 downto 0);
    alpha_gfx_addr  : out std_logic_vector(12 downto 0);
@@ -517,12 +491,20 @@ architecture struct of poleposition is
    adc_din          : in  std_logic_vector(7 downto 0);
    adc_intr_n       : in  std_logic;
    watchdog_wr      : out std_logic;
-   sub_illegal      : out std_logic;   -- ILLEGAL-SCREAM-2026-08-09
+   sub_illegal      : out std_logic;
    ioctl_addr       : in  std_logic_vector(24 downto 0);
    ioctl_data       : in  std_logic_vector(7 downto 0);
    rom_wr           : in  std_logic;
    ioctl_wr_idx0    : in  std_logic;
    ic25_en          : in  std_logic;
+   bootleg_io       : in  std_logic;
+   bl_steer         : in  std_logic_vector(7 downto 0);
+   bl_in0           : in  std_logic_vector(7 downto 0);
+   bl_dswa          : in  std_logic_vector(7 downto 0);
+   bl_dswb          : in  std_logic_vector(7 downto 0);
+   bl_dac           : out std_logic_vector(3 downto 0);
+   bl_latch         : out std_logic_vector(7 downto 0);
+   bl_latch_wr      : out std_logic;
    scan_sprite_addr : in  std_logic_vector(10 downto 0);
    scan_sprite_dout : out std_logic_vector(15 downto 0);
    scan_road_addr   : in  std_logic_vector(9 downto 0);
@@ -547,7 +529,7 @@ architecture struct of poleposition is
    wdog_en    : in  std_logic;
    vpos       : in  std_logic_vector(8 downto 0);
    kick       : in  std_logic;
-   pause      : in  std_logic;   -- PAUSE-GATE-2026-08-05
+   pause      : in  std_logic;
    wdog_reset : out std_logic
  );
  end component;
@@ -574,10 +556,7 @@ begin
 reset_n    <= not reset;
 clock_18n  <= not clock_18;
 
--- CPU-subsystem reset = system reset OR'd with the watchdog pulse (pp_watchdog
--- instance below). Feeds ONLY u_pp_cpu (Z80 + both Z8002s), matching MAME's
--- watchdog_fired()->schedule_soft_reset(). Video pipeline / ioctl-download /
--- ROM-load reset are untouched (still driven straight from the `reset` input).
+-- CPU board reset = system reset OR watchdog
 cpu_reset_w <= reset or wdog_reset_w;
 
 zero8  <= (others => '0');
@@ -602,51 +581,7 @@ begin
 end process;
 cen <= '1' when cen_cnt = "0000" else '0';
 
--- PIXCLK-FIX-2026-08-09 -----------------------------------------------------
--- ena_vidgen is the pixel clock enable: it steps gen_video's H/V counters, the
--- renderer (pp_video_composite.ce) AND the core's output CE_PIXEL
--- (Arcade-PolePosition.sv:426 `wire ce_pix = ce_vid;`).
---
--- Pole Position needs a 6.144 MHz pixel clock (MAME polepos.cpp:950
--- set_raw(MASTER_CLOCK/4, 384, 0, 256, 264, ...) with MASTER_CLOCK=24.576 MHz),
--- i.e. 384*264 @ 60.606 Hz. clock_18 is now 49.152 MHz (the PLL is single-output;
--- the signal name is a fossil of the old 18.432 MHz domain), so the enable must
--- be exactly 1-in-8: 49.152/8 = 6.144 MHz.
---
--- The original below was inherited unchanged from Xevious, whose 18.432 MHz
--- domain needs 1-in-3 (18.432/3 = 6.144 MHz). Run at 49.152 MHz it measures
--- ~1-in-6 => 8.192 MHz pixel clock => 384*264 @ 80.8 Hz, i.e. video ~33% fast.
--- The CPU divider WAS re-derived for the new clock (cen = clk/16 = 3.072 MHz,
--- matching MAME's Z80 MASTER_CLOCK/8), which is why boot speed matches MAME
--- while everything downstream of the first EI breaks.
---
--- Measured in verilator/pp_maincpu before this change: 609,888 clk/frame
--- (6.016 clk per pixel step). Correct is 384*8*264 = 811,008 clk/frame.
---
--- To revert: delete the process below, uncomment the original.
---   process (clock_18, hcnt)
---   begin
---   	if rising_edge(clock_18) then
---   		slot24  <= slot24 + "00001";
---   		slot    <= slot + "001";
---   		if slot = "101" then
---   			if (hcnt(2 downto 0) = "111") then slot24 <= (others=>'0'); end if;
---   			if (hcnt(0) = '1') then slot <= "000"; else slot <= "011"; end if;
---   		end if;
---   	end if;
---   end process;
---
---   process (clock_18)
---   begin
---   	if rising_edge(clock_18) then
---   		ena_vidgen <= '0';
---   		if slot = "100" or slot = "001" then ena_vidgen <= '1'; end if;
---   	end if;
---   end process;
-------------------------------------------------------------------------------
--- `slot` is reused as the 1-in-8 divider (it had no reader outside this block).
--- `slot24` never had a reader at all; it is kept ticking only so the signal is
--- not left undriven.
+-- pixel clock enable: 1-in-8 of 49.152 MHz = 6.144 MHz (MAME MASTER_CLOCK/4)
 process (clock_18)
 begin
 	if rising_edge(clock_18) then
@@ -674,11 +609,7 @@ port map(
 	v_offset => v_offset
 );
 
--- FULL video compositor: view/bg (vpos<128) OR road (vpos>=128) -> sprites ->
--- alpha, per MAME screen_update. Reads the REAL scan_alpha/view/road/sprite
--- buffers from PolePosition_CPU; gfx from the top-side chars/tiles/road/scalelut/
--- sprite ROMs; palettes pp_palette_alpha/view/road/sprite. Both generators are
--- co-sim-verified (verilator/road, verilator/sprite).
+-- video compositor: view / road, sprites, alpha (MAME screen_update)
 u_video_composite : pp_video_composite
 port map(
 	clk              => clock_18,
@@ -686,7 +617,7 @@ port map(
 	hpos             => hcnt,
 	vpos             => vcnt,
 	chacl            => chacl_w,
-	diag_swatch      => diag_swatch,   -- DIAG-REVERT-2026-08-16
+	diag_swatch      => diag_swatch,
 	alpha_scan_addr  => bru_scan_addr,
 	alpha_scan_dout  => alpha_scan_dout,
 	alpha_gfx_addr   => gfx_addr,
@@ -715,8 +646,7 @@ port map(
 	b                => bru_b
 );
 
--- CPU subsystem: Z80 maincpu + 2x Z8002 game CPUs + shared VRAM. Its Z8002s
--- write the alpha buffer during attract -> real text. Sound/IO/06xx tied off.
+-- CPU board: Z80 + 2x Z8002 + shared video RAM
 u_pp_cpu : PolePosition_CPU
 port map(
 	clk              => clock_18,
@@ -747,10 +677,9 @@ port map(
 	wsg_addr         => wsg_addr_w,
 	wsg_dout         => wsg_dout_w,
 	wsg_wr           => wsg_wr_w,
-	wsg_rd           => open,        -- unused: reg_dout is a live combinational readback,
-	                                  -- no read-strobe needed (see namco_wsg8.sv)
+	wsg_rd           => open,
 	wsg_din          => wsg_din_w,
-	engine_dout      => engine_dout_w,   -- ENGINE-SOUND-2026-08-06: now real (u_engine below)
+	engine_dout      => engine_dout_w,
 	engine_lsb_wr    => engine_lsb_wr_w,
 	engine_msb_wr    => engine_msb_wr_w,
 	adc_wr           => adc_wr_w,
@@ -758,12 +687,20 @@ port map(
 	adc_din          => adc_din_w,
 	adc_intr_n       => adc_intr_n_w,
 	watchdog_wr      => watchdog_wr_w,
-	sub_illegal      => sub_illegal,   -- ILLEGAL-SCREAM-2026-08-09
+	sub_illegal      => sub_illegal,
 	ioctl_addr       => cpu_ioctl_addr,
 	ioctl_data       => dn_data,
 	rom_wr           => cpu_rom_wr,
 	ioctl_wr_idx0    => dn_wr,
 	ic25_en          => ic25_en,
+	bootleg_io       => bootleg_io,
+	bl_steer         => steer_in,
+	bl_in0           => bl_in0_byte,
+	bl_dswa          => dip_switch_a,
+	bl_dswb          => dip_switch_b,
+	bl_dac           => bl_dac_w,
+	bl_latch         => bl_latch_w,
+	bl_latch_wr      => bl_latch_wr_w,
 	scan_sprite_addr => sprite_scan_addr_w,
 	scan_sprite_dout => sprite_scan_dout_w,
 	scan_road_addr   => road_scan_addr_w,
@@ -780,9 +717,6 @@ port map(
 	hs_write         => hs_write
 );
 
--- watchdog (rtl/pp_watchdog.sv). vpos = vcnt, the SAME source fed to u_pp_cpu's
--- vpos port above (vcnt is gen_video's counter, NOT gated by CPU reset). See
--- pp_watchdog.sv header for the MAME citation and the vblank-line source.
 u_watchdog : pp_watchdog
 port map(
 	clk        => clock_18,
@@ -794,10 +728,6 @@ port map(
 	wdog_reset => wdog_reset_w
 );
 
--- ADC0804 (rtl/adc0804.sv) accelerator/brake pedal converter. Channel select is
--- gasel_w (LS259 q3, MAME polepos.h m_analog_io{"BRAKE","ACCEL"}): gasel=0
--- selects BRAKE, gasel=1 selects ACCEL. accel_in/brake_in are entity inputs
--- (Arcade-PolePosition.sv currently drives a digital placeholder, see there).
 adc_vin_w <= accel_in when gasel_w = '1' else brake_in;
 
 u_adc : adc0804
@@ -824,15 +754,10 @@ port map(
 	wave_wr   => wsg_prom_wr,
 	wave_addr => wsg_prom_addr,
 	wave_data => wsg_prom_data,
-	audio     => wsg_audio_w        -- ENGINE-SOUND-2026-08-06: was `audio` directly;
-);                                  -- now one of two voices into the mix below.
+	audio     => wsg_audio_w
+);
 
--- ---- engine ("car") sound -------------------------------------------------
--- MAME polepos_a.cpp polepos_sound_device: an 8-slot x 0x800 waveform ROM read
--- by a phase accumulator whose rate comes from the 0xA200/0xA300 register pair,
--- with a per-slot volume. clson is LS259 q2 = the same sound_en that gates the
--- WSG (polepos.cpp:938). See pp_engine_snd.sv's header for the rate derivation
--- and for what is deliberately NOT modelled (the 3-pole analog filter chain).
+-- engine sound (MAME polepos_a.cpp polepos_sound_device)
 u_engine : pp_engine_snd
 port map(
 	clk      => clock_18,
@@ -847,12 +772,7 @@ port map(
 	audio    => engine_audio_w
 );
 
--- ---- 52xx voice ("sample player") -----------------------------------------
--- MAME polepos_a.cpp CHANL4. The 52xx MCU decodes the
--- voice ROM itself and puts 4-bit PCM on its P pins (namco52.cpp:14 "OUT0-OUT3
--- = sound output"), so this stage is only the analog tail: R1 ladder DAC,
--- VREF offset, highpass, lowpass, level. See pp_voice52_snd.sv for the two
--- filter deviations and for the single level knob.
+-- 52xx voice: DAC + filters on the 52xx's 4-bit output
 u_voice52 : pp_voice52_snd
 port map(
 	clk    => clock_18,
@@ -862,10 +782,7 @@ port map(
 	audio  => voice_audio_w
 );
 
--- ---- 54xx noise (tyre screech / crash / rumble) ----------------------------
--- MAME polepos_a.cpp CHANL1/2/3. The 54xx MCU generates the
--- waveform and presents three 4-bit levels; this stage is DAC + bandpass only.
--- Channel->band mapping is load-bearing, see pp_noise54_snd.sv's header.
+-- 54xx noise: DAC + bandpass on the 54xx's three 4-bit outputs
 u_noise54 : pp_noise54_snd
 port map(
 	clk     => clock_18,
@@ -877,17 +794,38 @@ port map(
 	audio   => noise_audio_w
 );
 
--- AUDIO-MIX-2026-09-23: MAME polepos.cpp route gains. WSG 0.80 and 52xx 0.90 applied here;
--- engine (0.90*0.77) and 54xx (0.90) are folded into their modules' output scaling.
--- Original unweighted sum below.
--- audio_mix_s <= resize(signed(wsg_audio_w), 18) + resize(signed(engine_audio_w), 18)
---                                                + resize(signed(voice_audio_w), 18)
---                                                + resize(signed(noise_audio_w), 18);
-wsg_gain_s   <= signed(wsg_audio_w)   * to_signed(205, 9);   -- 205/256 = 0.80
-voice_gain_s <= signed(voice_audio_w) * to_signed(230, 9);   -- 230/256 = 0.90
-audio_mix_s <= resize(shift_right(wsg_gain_s, 8), 18) + resize(signed(engine_audio_w), 18)
+-- bootleg speech board; its Z80 program sits in the (absent) 52xx's voice-ROM slot
+u_bootleg_snd : pp_bootleg_snd
+port map(
+	clk           => clock_18,
+	cen           => cen,
+	reset         => bs_reset,
+	pause         => pause,
+	latch_wr      => bs_latch_wr,
+	latch_din     => bl_latch_w,
+	rom_addr      => bs_rom_addr,
+	rom_data      => sample52_data,
+	audio         => bs_audio_w,
+	tms_wr_data   => open,
+	tms_wr_strobe => open
+);
+bs_reset      <= cpu_reset_w or not bootleg_snd;  -- VHDL-93: no expressions in port maps
+bs_latch_wr   <= bl_latch_wr_w and bootleg_snd;
+sample52_addr <= bs_rom_addr when bootleg_snd = '1' else n52_sample_addr;
+-- speech: MAME TMS5220 route 0.80, front speakers only -> 0.40 in this mono mix
+bs_gain_s  <= signed(bs_audio_w) * to_signed(102, 9);
+bs_audio_s <= resize(shift_right(bs_gain_s, 8), 18) when bootleg_snd = '1' else (others => '0');
+
+-- mix gains: WSG 0.80 x2 (music level), 52xx 0.90 (MAME routes); engine and 54xx are scaled in their modules
+wsg_gain_s   <= signed(wsg_audio_w)   * to_signed(205, 9);
+voice_gain_s <= signed(voice_audio_w) * to_signed(230, 9);
+-- bootleg 4-bit DAC: (v - 8) at 0.12 of full scale (MAME route)
+bl_dac_s <= resize((signed(resize(unsigned(bl_dac_w), 5)) - 8) * to_signed(492, 11), 18) when bootleg_io = '1' else (others => '0');
+audio_mix_s <= resize(shift_right(wsg_gain_s, 7), 18) + resize(signed(engine_audio_w), 18)
                                                       + resize(shift_right(voice_gain_s, 8), 18)
-                                                      + resize(signed(noise_audio_w), 18);
+                                                      + resize(signed(noise_audio_w), 18)
+                                                      + bl_dac_s
+                                                      + bs_audio_s;
 audio <= x"7FFF" when audio_mix_s >  to_signed(32767, 18) else
          x"8000" when audio_mix_s < to_signed(-32768, 18) else
          std_logic_vector(audio_mix_s(15 downto 0));
@@ -897,7 +835,7 @@ begin
 	if rising_edge(clock_18) then
 		if reset = '1' then
 			mcu_div <= '0';
-			mcu_div_cnt <= 0;                       -- MCU-DIV6-2026-08-11
+			mcu_div_cnt <= 0;
 		elsif cen = '1' then
 			mcu_div <= not mcu_div;
 			if mcu_div_cnt = MCU_CEN_DIV - 1 then
@@ -910,45 +848,26 @@ begin
 end process;
 mcu_ena <= '1' when (cen = '1' and mcu_div_cnt = MCU_CEN_DIV - 1 and pause = '0') else '0';
 
--- MCUs held in reset by EITHER the system reset OR the LS259 namco_reset latch
--- (q1, MAME reset(state) -- active-high "running", power-on default = held reset).
+-- Namco MCUs: reset by system reset or LS259 q1
 mcu_reset_n <= (not reset) and namco_reset_w;
 
--- IN0 (MAME PORT_START("IN0"), z80_map via the 51xx's input<2>/<3> nibbles).
--- All physical bits are IP_ACTIVE_LOW; bit2 (auto_start) is program-controlled
--- (sb0_w from the LS259, NOT a physical input); bit1 (Gear Change) repurposes
--- fire1 (dead in this Namco scaffold otherwise); bits 3/0 are MAME IPT_UNUSED.
--- AUTOSTART-POLARITY-FIX-2026-08-11: bit2 follows sb0 DIRECTLY, not inverted.
--- Symptom it fixes: self-test printed "MANUAL START" (operators manual: "suspect
--- the game harness"), attract/gameplay never started -- live issue #1.
---
--- Bit 2 is NOT a physical button. polepos.cpp:504 marks it IPT_CUSTOM "start 1,
--- program controlled": the Z80 writes LS259 q6 ($A006 -> sb0) and reads the line
--- back here, through the 51xx. pp_maincpu.asm $0A6F-$0A99 is a two-phase
--- loopback test, and the messages are "AUTO START" @$11FE / "MANUAL START" @$120B:
---     $0A72  and $04 / jr nz  -> bit2 must be 0 here, else MANUAL
---     $0A7C  writes sb0 := 1
---     $0A8B  and $04 / ret nz -> bit2 must be 1 there
--- So the line must FOLLOW sb0. Inverting it fails phase 1 on the very first pass,
--- and the only code that ever sets sb0 sits BEHIND that branch -- unescapable.
---
--- Why the old code looked right: MAME's auto_start_r() returns
--- `m_auto_start_mask = !sb0`, so `not sb0_w` matches the callback literally. But
--- the field is IP_ACTIVE_LOW, and MAME applies that inversion to custom fields
--- too, so the byte the game sees is !(!sb0) = sb0. The two inversions cancel.
--- Confirmed by observation, not derivation: MAME's self-test prints AUTO START
--- (user, 2026-08-11) where ours printed MANUAL.
--- Original below, restore by swapping the two bit-2 terms:
--- in0_byte <= (not self_test) & (not service) & (not coin2) & (not coin1)
---             & '1' & (not sb0_w) & (not fire1) & '1';
+-- IN0 bit 2 follows sb0 directly: program-controlled auto start (IP_ACTIVE_LOW cancels MAME's !sb0)
 in0_byte <= (not self_test) & (not service) & (not coin2) & (not coin1)
             & '1' & sb0_w & (not fire1) & '1';
 
--- 52xx and 54xx (both built 2026-07-28) legitimately have NO read_callback<2>/<3>
--- bound in polepos.cpp -- namco52.cpp/namco54.cpp have no read() method at all --
--- so chip2_din/chip3_din staying tied to this 0xFF stub is CORRECT and permanent,
--- not a placeholder: it matches MAME's devcb_read8 unbound-callback default
--- exactly for both chips (verified by reading both device sources directly).
+-- bootleg I/O board IN0 (active low): b7 test, b6 coin1, b5 gear; the 51xx sees only IN0>>4 (MAME)
+bl_in0_byte <= (not self_test) & (not coin1) & (not fire1) & '1' & '0' & "111";
+in0_51xx    <= (bl_in0_byte(7 downto 4) & "0000") when bootleg_io = '1' else in0_byte;
+dswb_51xx   <= x"00" when bootleg_io = '1' else dip_switch_b;
+-- bootleg board has no 53xx/52xx/54xx: chips 1-3 deselected, chip 1 reads FF
+bl_off_n      <= not bootleg_io;
+n06_chipsel_g <= (n06_chipsel(3) and bl_off_n) & (n06_chipsel(2) and bl_off_n)
+               & (n06_chipsel(1) and bl_off_n) & n06_chipsel(0);
+n06_chip_wr_g <= (n06_chip_wr(3) and bl_off_n) & (n06_chip_wr(2) and bl_off_n)
+               & (n06_chip_wr(1) and bl_off_n) & n06_chip_wr(0);
+chip1_din_06  <= x"FF" when bootleg_io = '1' else chip1_din;
+
+-- 52xx/54xx have no read callback (MAME): 0xFF
 chip23_din <= (others => '1');
 
 u_n06xx : namco_06xx
@@ -966,7 +885,7 @@ port map(
 	chipsel   => n06_chipsel,
 	rw0       => n06_rw0,
 	chip0_din => chip0_din,
-	chip1_din => chip1_din,
+	chip1_din => chip1_din_06,
 	chip2_din => chip23_din,
 	chip3_din => chip23_din,
 	chip_dout => n06_chip_dout,
@@ -983,8 +902,8 @@ port map(
 	data_out    => chip0_din,
 	wr_en       => n06_chip_wr(0),
 	wr_data     => n06_chip_dout,
-	dswb        => dip_switch_b,
-	in0         => in0_byte,
+	dswb        => dswb_51xx,
+	in0         => in0_51xx,
 	p_port_out  => open,
 	rom_wr      => mcu_rom_wr,
 	rom_addr_in => mcu_rom_addr,
@@ -997,7 +916,7 @@ port map(
 	clk         => clock_18,
 	ena         => mcu_ena,
 	reset_n     => mcu_reset_n,
-	chip_sel    => n06_chipsel(1),
+	chip_sel    => n06_chipsel_g(1),
 	data_out    => chip1_din,
 	dswa        => dip_switch_a,
 	steer_in    => steer_in,
@@ -1006,16 +925,14 @@ port map(
 	rom_data_in => mcu_rom_data
 );
 
--- 54xx: 06xx chip3 slot (write-only, no read_callback in MAME -- see chip23_din
--- comment above). discrete_o0/o1/r1 feed MAME's analog "discrete" sound circuit,
--- not modeled yet -- left open, same TODO status as u_pp_cpu's engine_* ports.
+-- 54xx: 06xx chip 3, write-only
 u_n54xx : namco_54xx
 port map(
 	clk         => clock_18,
 	ena         => mcu_ena,
 	reset_n     => mcu_reset_n,
-	chip_sel    => n06_chipsel(3),
-	wr_en       => n06_chip_wr(3),
+	chip_sel    => n06_chipsel_g(3),
+	wr_en       => n06_chip_wr_g(3),
 	wr_data     => n06_chip_dout,
 	discrete_o0 => n54_o0_w,
 	discrete_o1 => n54_o1_w,
@@ -1025,20 +942,17 @@ port map(
 	rom_data_in => mcu_rom_data
 );
 
--- 52xx: 06xx chip2 slot (write-only, no read_callback in MAME -- see chip23_din
--- comment above). discrete_p feeds MAME's analog "discrete" sound circuit, not
--- modeled yet. sample_addr/sample_data are the external 0x8000 "voice" ROM
--- (ioctl index 5, wired at the poleposition entity level via sample52_addr/data).
+-- 52xx: 06xx chip 2, write-only; voice ROM via sample52_*
 u_n52xx : namco_52xx
 port map(
 	clk         => clock_18,
 	ena         => mcu_ena,
 	reset_n     => mcu_reset_n,
-	chip_sel    => n06_chipsel(2),
-	wr_en       => n06_chip_wr(2),
+	chip_sel    => n06_chipsel_g(2),
+	wr_en       => n06_chip_wr_g(2),
 	wr_data     => n06_chip_dout,
-	discrete_p  => n52_p_w,      -- VOICE52-2026-08-11: was `open` (voice was silent)
-	sample_addr => sample52_addr,
+	discrete_p  => n52_p_w,
+	sample_addr => n52_sample_addr,
 	sample_data => sample52_data,
 	rom_wr      => mcu_rom_wr,
 	rom_addr_in => mcu_rom_addr,

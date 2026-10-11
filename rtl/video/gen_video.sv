@@ -1,16 +1,6 @@
 //============================================================================
-//  gen_video.sv -- 1:1 transliteration of rtl/gen_video.vhd (Pole Position
-//  video horizontal/vertical and sync generator, originally by Dar
-//  (darfpga@aol.fr), http://darfpga.blogspot.fr).
-//
-//  Mechanical VHDL -> SystemVerilog port, 2026-08-05. NO intended behavior
-//  change: every signal, initial value, comparison and commented-out block
-//  below is preserved exactly as in the .vhd (source of truth; do not edit
-//  it). Original French comments translated to English in place, same lines.
-//
-//  csync is declared but NEVER DRIVEN in this architecture -- the only
-//  assignment to it is the commented-out block below (also commented out in
-//  the .vhd). Preserved as-is; not a translation error.
+//  gen_video.sv -- Pole Position H/V counters and sync, SystemVerilog port of gen_video.vhd
+//  by Dar (darfpga@aol.fr, http://darfpga.blogspot.fr). csync is not driven (as in the original).
 //============================================================================
 `default_nettype none
 
@@ -21,7 +11,7 @@ module gen_video (
     output wire [8:0]  vcnt,
     output wire         hsync,
     output logic        vsync,
-    output wire         csync,    // composite sync for TV -- never driven, see header
+    output wire         csync,  // composite sync, not driven
     output wire         blank_h,
     output wire         blank_v,
     output logic        blankn,
@@ -29,7 +19,7 @@ module gen_video (
     input  wire signed [3:0] v_offset
 );
 
-    logic [1:0] hclkReg;          // declared, unused in the source .vhd too -- preserved (Xevious leftover)
+    logic [1:0] hclkReg;  // unused
     logic       hblank;
     logic       vblank;
     logic [8:0] hcntReg = 9'd0;   // VHDL: hcntReg := to_unsigned(0,9)
@@ -39,17 +29,11 @@ module gen_video (
     logic hsync1;
     logic hsync2;
 
-    // VHDL: signal hsync_base, vsync_base : integer;  (no initializer -> power-up
-    // state undefined until first assignment, same here)
     integer hsync_base;
     integer hsync_end;
     integer vsync_base;
 
-    // 32-bit zero-extended views of the unsigned counters, used only where they
-    // are compared against the (signed, 32-bit) hsync_base/vsync_base -- makes
-    // explicit the same UNSIGNED-vs-INTEGER comparison numeric_std performs
-    // implicitly in the VHDL (Verilator otherwise flags an implicit width
-    // extension; the resulting comparison is numerically identical either way).
+    // 32-bit views for the unsigned-vs-integer compares (as numeric_std does)
     wire [31:0] hcnt32 = 32'(hcntReg);
     wire [31:0] vcnt32 = 32'(vcntReg);
 
@@ -87,16 +71,7 @@ module gen_video (
                 hcntReg <= hcntReg + 1;
             end
 
-            // VHDL: hsync_base <= 495 + to_integer(resize(h_offset, 9));
-            // h_offset is signed; the explicit int'() cast sign-extends it to 32
-            // bits before the add, matching the VHDL resize()+to_integer() step.
-            // Sync sits inside the blanking interval (hcnt 128..255): active is
-            // 256..511, so 177 gives front porch 49 / sync 29 / back porch 50.
-            // It previously sat at 495, overlapping the last 17 active pixels and
-            // leaving a 115-count back porch -- invisible on the scaler (which crops
-            // on blank_h) but pushed the picture hard right on an analog CRT.
-            // hsync_end is computed, not hardcoded: the old -384 term assumed the
-            // pulse wrapped past 511 and would never match once it no longer does.
+            // sync inside blanking (hcnt 128..255): front porch 49 / sync 29 / back porch 50; h_offset sign-extended
             hsync_base <= 177 + int'(h_offset);
             hsync_end  <= ((177 + int'(h_offset) + 29) > 511)
                         ?  (177 + int'(h_offset) + 29 - 384)
@@ -123,18 +98,6 @@ module gen_video (
                 hsync2 <= 1'b1;
             end
 
-
-            //if     vcntReg = (vsync_base+ 2-1+2) mod 264 then csync <= hsync1;
-            //elsif  vcntReg = (vsync_base+ 3-1+2) mod 264 then csync <= hsync1;
-            //elsif  vcntReg = (vsync_base+ 4-1+2) mod 264 then csync <= hsync1; -- and hsync2;
-            //elsif  vcntReg = (vsync_base+ 5-1+2) mod 264 then csync <= hsync2; -- not(hsync1);
-            //elsif  vcntReg = (vsync_base+ 6-1+2) mod 264 then csync <= hsync2; -- not(hsync1);
-            //elsif  vcntReg = (vsync_base+ 7-1+2) mod 264 then csync <= hsync2; -- not(hsync1) or not(hsync2);
-            //elsif  vcntReg = (vsync_base+ 8-1+2) mod 264 then csync <= hsync1;
-            //elsif  vcntReg = (vsync_base+ 9-1+2) mod 264 then csync <= hsync1;
-            //elsif  vcntReg = (vsync_base+10-1+2) mod 264 then csync <= hsync1;
-            //else                          csync <= hsync0;
-            //end if;
             vsync_base <= 250 + int'(v_offset);
             if ((vcnt32 == (vsync_base+10)) && (int'(v_offset) < (263-250-10))) begin
                 vsync <= 1'b1;
@@ -146,50 +109,7 @@ module gen_video (
                 vsync <= 1'b0;
             end
 
-            // Screen-position trim vs MAME (2026-07-14, HW-tuned): shift picture LEFT 2,
-            // DOWN 2 via the visible-window (blank) compares. H start +N = left N (base
-            // was +1; now +3 = 2 px further left, HW-confirmed V already correct at +0
-            // = down 2). screen-x grows with hcnt, screen-y with vcnt.
-            //
-            // WIDTH fix (HW-observed "left side is fat"): this whole
-            // 448/192 window was inherited unmodified from Xevious (288px: 32 tiles
-            // centre + 2 extra tile-columns shown on EACH side) -- flagged but never
-            // resolved in Claude/polepos_video_mapping_2026-07-13.md:302-306, since PP's
-            // real MAME set_raw() visible width is 256px, not 288. The 2026-07-14 pass
-            // only retuned the +1->+3 PHASE (both ends together), never the WIDTH. User
-            // confirmed on real HW the excess 32px is entirely on the LEFT, so trim only
-            // the deassert (left-edge/start-of-active) side by the full 32px; the assert
-            // (right edge) point is untouched.
-            //
-            // PHASE re-tune #unverified (2026-07-28): user suspects the 2026-07-14 +3
-            // (base was +1, then bumped to +3 = 2px further left) was itself mistuned --
-            // dropped entirely (N=0) here, both edges together so the 256px width above
-            // is preserved, net effect vs the immediately-prior state = shift RIGHT 3px.
-            // HW-untested pending next compile; revert to +3 on both terms if wrong.
-            // PHASE-SHIFT-2026-08-05 (HW-measured, user counted tiles): the picture
-            // sat 5 tile-columns too far RIGHT -- the leftmost 5 columns belonged on
-            // the right edge. Shift LEFT 5 tiles = 40 px, per this file's own
-            // HW-tuned convention "H start +N = left N".
-            //   +40 on BOTH compares, so the 256 px active width is PRESERVED
-            //   (change one term to resize, both together to shift).
-            //   assert:   448+16+8 = 472, +40 = 512 -> hcnt counts 128..511 (384
-            //             wide), so it WRAPS: 512-384 = 128.
-            //   deassert: 192-16+8+32 = 216, +40 = 256.
-            //   Result: active 256..511 = 256 px, blanking 128..255 = 128 px, total
-            //   384. The +32 already present on the deassert is the 2026-07-28 WIDTH
-            //   trim (288->256 Xevious excess) and must stay -- it is not a phase term.
-            // This also supersedes the untested "N=0" phase drop noted above, which
-            // had shifted the picture RIGHT 3 px and was never HW-verified.
-            // VERTICAL DELIBERATELY UNTOUCHED: user confirms top/bottom already align.
-            // PIXCLK-PHASE-2026-08-09: REVERTED (HW-tested, user: "you broke the video
-            // output with that realignment by one pixel column"). After
-            // PIXCLK-FIX-2026-08-09 the picture sits 1 px too far LEFT, but moving the
-            // phase term 40 -> 39 on both hblank compares did NOT fix it -- it broke
-            // output entirely. Restored to 40. The 1 px offset is a KNOWN-OPEN cosmetic
-            // issue; do not retry the naive both-terms-by-one shift, it has been tested
-            // and failed. Likely needs the ena_vidgen/hcnt phase addressed instead,
-            // since the corrected 1-in-8 enable is free-running where the old Xevious
-            // slot machine self-synced to hcnt(0).
+            // visible window: active hcnt 256..511 (256 px), blanking 128..255; vertical as original
             if (hcntReg == (448+16+8+40-384)) begin        // = 128
                 hblank <= 1'b1;
             end else if (hcntReg == (192-16+8+32+40)) begin // = 256

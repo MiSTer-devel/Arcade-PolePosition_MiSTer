@@ -1,24 +1,7 @@
 //============================================================================
-//  pp_palette_road.sv — Pole Position ROAD layer palette lookup
-//
-//  Ports MAME's polepos_palette() index arithmetic verbatim for the road layer
-//  (polepos_v.cpp:123-126), the sibling of pp_palette_view but with a 10-bit
-//  index (the road pen is (roadpal<<6)|roadval, not {color,pixel}):
-//
-//    stage 1: promval = road_prom[ road_index[9:0] ]         (proms 0x800, 1024)
-//             road_index = (roadpal[3:0] << 6) | roadval[5:0]  (from the generator)
-//    stage 2: indirect = 0x40 + promval                      (MAME: 0x040+color)
-//    stage 3: r/g/b nib = {red,green,blue}_prom[indirect]    (proms 0x000/1/2)
-//    stage 4: R/G/B = weighted-resistor DAC (0x0e/1f/43/8f)  (same as alpha/view)
-//
-//  Like the bg/view palette: NO transparency, NO 128V banking (single bank). The
-//  road is drawn opaquely for the lower half (vpos>=128); the compositor selects
-//  road-vs-black there, alpha still composites on top.
-//
-//  PROM load: ioctl "proms" region. road_prom is 0x800-0xBFF (prom_addr[11:10]==
-//  2'b10, index=prom_addr[9:0]); R/G/B are 0x000/0x100/0x200 (prom_addr[11:8]=
-//  0/1/2, index=prom_addr[7:0]). prom_addr is 12-bit to reach 0xBFF.
-//  Latency = 2 clk (matches the other palettes for compositor alignment).
+//  pp_palette_road.sv -- road palette, MAME polepos_palette() (polepos_v.cpp):
+//    promval = road_prom[road_index] (0x800, 1024 entries); indirect = 0x40 + promval -> R/G/B PROMs.
+//    Opaque, single bank. Latency 2 clk.
 //============================================================================
 
 `default_nettype none
