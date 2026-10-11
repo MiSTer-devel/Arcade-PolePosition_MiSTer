@@ -1,5 +1,5 @@
 <misterromdescription>
-    <name>Speed Up (Spanish bootleg)</name>
+    <name>Speed Up (Spanish Bootleg)</name>
     <region>World</region>
     <homebrew>no</homebrew>
     <bootleg>yes</bootleg>
@@ -121,6 +121,6 @@
         <dip name="Demo Sounds"   bits="15,15" ids="On,Off"/>
     </switches>
 
-    <remark>Speed Up (bootleg, Spanish)</remark>
+    <remark>Speed Up (Bootleg, Spanish)</remark>
     <mratimestamp>20260921000000</mratimestamp>
 </misterromdescription>

@@ -1,5 +1,5 @@
 <misterromdescription>
-    <name>Pole Position (Atari version 1)</name>
+    <name>Pole Position (Atari Version 2)</name>
     <region>World</region>
     <homebrew>no</homebrew>
     <bootleg>no</bootleg>
@@ -11,7 +11,7 @@
     <manufacturer>Namco (Atari license)</manufacturer>
     <category>Driving</category>
 
-    <setname>poleposa1</setname>
+    <setname>poleposa2</setname>
     <parent>polepos</parent>
     <mameversion>0289</mameversion>
     <rbf>PolePosition</rbf>
@@ -24,7 +24,7 @@
     <players>1</players>
     <buttons names="Accelerate,Brake,Gear,Service Mode,Coin,Start 1P,Start 2P,Pause" default="A,B,X,Y,Select,Start,R,L"/>
 
-    <rom index="0" md5="none" zip="poleposa1.zip|polepos.zip">
+    <rom index="0" md5="none" zip="poleposa2.zip|polepos.zip">
         <!-- maincpu (Z80) 0x0000-0x2FFF -->
         <part crc="c918c043" name="136014-105.7h"/>
         <part crc="7174bcb7" name="136014-116.7f"/>
@@ -36,13 +36,13 @@
         <part repeat="16384">00</part>
         <!-- sub2 (Z8002 #2) -->
         <interleave output="16">
-            <part crc="ba0045f3" name="136014-104.4e" map="01"/>
-            <part crc="af4fc019" name="136014-103.3e" map="10"/>
+            <part crc="c52c98ed" name="136014-204.4e" map="01"/>
+            <part crc="eedea6e7" name="136014-203.3e" map="10"/>
         </interleave>
         <part repeat="16384">00</part>
     </rom>
 
-    <rom index="1" md5="none" zip="poleposa1.zip|polepos.zip">
+    <rom index="1" md5="none" zip="poleposa2.zip|polepos.zip">
         <!-- chars / tiles / sprites / bigsprites(GAP) / road / scalelut -->
         <part crc="a949aa85" name="136014-132.7n"/>
         <part crc="a949aa85" name="136014-132.7n"/>
@@ -61,10 +61,10 @@
         <part crc="ee6b3315" name="136014-127.2l"/>
         <part crc="6d1e7042" name="136014-128.2m"/>
         <part crc="4e97f101" name="136014-134.2n"/>
-        <part crc="5921777f" name="136014-131.11n"/>
+        <part crc="a61bff15" name="136014-231.11n"/>
     </rom>
 
-    <rom index="2" md5="none" zip="poleposa1.zip|polepos.zip">
+    <rom index="2" md5="none" zip="poleposa2.zip|polepos.zip">
         <part crc="f07ff2ad" name="136014-137.11e"/>
         <part crc="adbde7d7" name="136014-138.11d"/>
         <part crc="ddac786a" name="136014-139.11c"/>
@@ -93,7 +93,7 @@
     <rom index="4"></rom>
     <nvram index="4" size="2034"></nvram>
 
-    <rom index="5" md5="none" zip="poleposa1.zip|polepos.zip">
+    <rom index="5" md5="none" zip="poleposa2.zip|polepos.zip">
         <!-- engine sound, then 52xx voice padded to 0x8000 -->
         <part crc="b5ad4d5f" name="136014-110.12f"/>
         <part crc="8fdd2f6f" name="136014-111.12e"/>
@@ -121,6 +121,6 @@
         <dip name="Demo Sounds"   bits="8,8"   ids="On,Off"/>
     </switches>
 
-    <remark>Pole Position (Atari, version 1)</remark>
+    <remark>Pole Position (Atari, Version 2)</remark>
     <mratimestamp>20260921000000</mratimestamp>
 </misterromdescription>
