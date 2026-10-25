@@ -1,17 +1,68 @@
 // ============================================================================
-//  mb88_core.sv -- Fujitsu MB88xx 4-bit MCU core (MB8841/8843/8844).
-//  Based on MAME cpu/mb88xx/mb88xx.cpp (opcode for opcode, all 256 opcodes).
-//    A/X/Y 4-bit; PC 6-bit + PA 5-bit (11-bit); RAM 128 nibbles; stack 4 x {flags, PA, PC}.
-//    Interrupts: external pin, timer overflow, serial (pio[2:0], vectors 0x02/0x04/0x06).
-//    Timer: internal (pio7, /32) or external TC falling edge (pio6). Serial receive per MAME.
-//  Not modelled (as MAME): standby, external-clock serial, loadable 4-bit output PLA.
+//  MB88-2026-10-24: FLEET MASTER. One mb88_core.sv / mb88.sv pair for every MB88 core
+//  (Galaga, Arabian, Kangaroo, PolePosition, Namco6809), md5-identical everywhere.
+//  Master home: Arcade-Galaga_MiSTer/rtl/cpu/mb88_sv/. Edit it there, then copy out.
+//  Merged lineages (all fixes from every copy are present):
+//    Kangaroo 2026-07-10 origin: MCU-TIMER-FIX / MCU-TIMERVF-FIX (07-11), serial (07-18)
+//    PolePosition: TC-TIMER-FIX (07-17), O-PORT-STROBE o_wr (08-09), serial 1 shift per
+//      ce (SERIALRATE 09-19, HW-confirmed), IRQ_ENTRY_STALL parameter (09-23, 54xx = 3)
+//    Galaga 2026-10-04: ram_clr power-on RAM / stack clear input
+//    Arabian (Kangaroo 08-21 snapshot): IRQ-CYCLES-FIX = MAME interrupt entry (instruction
+//      first, post-instruction PC pushed, 3 ce) -> parameter IRQ_AFTER_INSN (Arabian = 1)
+//  Per-core settings that keep every core's previous behaviour:
+//    IRQ_AFTER_INSN  0 = take the interrupt at fetch instead of the instruction, 1 ce +
+//                        IRQ_ENTRY_STALL (Galaga, PolePosition, Kangaroo, Namco6809)
+//                    1 = MAME burn_cycles(): instruction, then 3 ce entry (Arabian)
+//    IRQ_ENTRY_STALL 0, or 3 for the 54xx (only used when IRQ_AFTER_INSN = 0)
+//    ram_clr         tie 1'b0 unless the core sweeps MCU RAM at power-on (Galaga: core reset)
+// ============================================================================
+//  mb88.sv  —  Fujitsu MB88xx 4-bit MCU core (MB8841/8843 family)
+//  Greenfield, correctness-first re-implementation in SystemVerilog for Verilator
+//  co-sim debugging (primary target: Kangaroo MB8841 protection MCU bug).
+//
+//  Oracle: MAME cpu/mb88xx/mb88xx.cpp (opcode-for-opcode).  Verified vs mb88xx.h.
+//
+//  Architecture (MB8841 = 11-bit program / 7-bit data):
+//    A/X/Y = 4-bit; PC = 6-bit + PA = 5-bit -> GETPC = (PA<<6)|PC (11-bit).
+//    Data RAM = 128 nibbles, EA = (X<<4)+Y & 0x7F.  Stack = 4 x {flags,PA,PC}.
+//    Flags: st(skip-branch), zf(1=zero), cf(carry), vf(timer), sf(serial), if(irq).
+//    Reset: all 0, st=1.  st gates ONLY jmp/call/jpl/jpa (MB88 conditional model).
+//
+//  COMPLETE vs MAME mb88xx.cpp — opcode AND non-opcode.
+//  ----------------------------------------------------------------------------
+//  OPCODES: all 256 bytes, verified byte-for-byte vs mb88xx.cpp execute_run()
+//    (0x00-2f individual; 0x30-3f sbit/rbit/tbit/rti/jpa/en/dis; 0x40-7f setD/
+//    rstD/tstD/tba/xd/xyd/lxi/call/jpl/ai; 0x80-bf lyi/li/cyi/ci; 0xc0-ff jmp).
+//    No S_ILLEGAL is reachable — mb88 decodes every byte.
+//  NON-OPCODE (all implemented):
+//    * Interrupts: external-pin (rising-edge), timer-overflow, serial; enabled by
+//      pio[2:0]; vectors 0x02 / 0x04 / 0x06 (ext > timer > serial priority).
+//    * Timer: internal (pio7, ÷32 prescale) OR external TC pin (pio6) per MAME
+//      increment_timer() (2026-07-11 + 2026-07-17 fixes).
+//    * SERIAL: 4-bit RECEIVE shift @ clock()/6, armed by pio[5:4]==0x20; shifts SI
+//      in, sets sf + serial IRQ after 4 bits; runaway guard (SERIAL_DISABLE_THRESH);
+//      tsts re-arm/SBcount-reset. DIRECTED CO-SIM PROVEN: serial fill -> serial IRQ
+//      -> vector 0x06 (verilator/mb88 serial_test.bin).
+//    * O-port PLA: 8-bit cf-nibble-select outO = MAME write_pla with pla_bits==8
+//      (the device default; what the Namco 5xxx use).
+//  NOT MODELLED — NONE are gaps (MAME doesn't model them for the default part, or
+//  no target device uses them):
+//    * STANDBY (stby_n pin): MAME has no standby/STOP state for mb88.
+//    * External-clock serial (pio 0x10/0x30): MAME fatalerror's it (unsupported).
+//    * 4-bit loadable output PLA (set_pla_bits(4)+set_pla_data): opt-in per-device
+//      table; add a pla_data port only if a target programs a custom output PLA.
 // ============================================================================
 
-// extra ce cycles before an interrupt handler's first fetch: 0 = 1-ce entry (51xx/52xx/53xx),
-// 3 = MAME burn_cycles(3) (54xx: lets the 06xx byte land before the handler reads it)
-module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
+// IRQ-ENTRY-STALL-2026-09-23: extra ce cycles spent entering an interrupt before the handler's first
+// fetch. 0 = legacy 1-ce entry (51xx/52xx/53xx rely on it; the global MAME-exact change broke the
+// 51xx and the main-CPU POST on 2026-09-19). 3 = MAME burn_cycles(3); the 54xx needs it or its IRQ
+// handler reads the command latch before the 06xx byte lands (verilator/n54_cosim).
+// MB88-2026-10-24: IRQ_AFTER_INSN added (Arabian's IRQ-CYCLES-FIX-2026-08-21 path), see header.
+// module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
+module mb88_core #(parameter IRQ_ENTRY_STALL = 0, parameter IRQ_AFTER_INSN = 0)
 (
     input  wire        clk, ce, reset_n,
+    input  wire        ram_clr,        // power-on: sweep RAM and stack to 0 while held (with reset_n low)
     input  wire        ena_timer,      // timer enable (already ÷32-prescaled externally)
 
     // internal mask ROM (external here so the co-sim / core can load it)
@@ -24,7 +75,12 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
     output reg  [15:0] r_out,          // R0..R3 output latch
     output reg  [3:0]  p_out,          // P output latch
     output reg  [7:0]  o_out,          // O output latch (via PLA - stubbed identity)
-    // pulses on every outO, changed or not (MAME write_pla always calls m_write_o)
+    // O-PORT-STROBE-2026-08-09: pulses for one ce cycle on EVERY outO instruction,
+    // whether or not o_out's value changed. MAME's write_pla() ends with an
+    // unconditional `m_write_o(0, m_o_output, mask)` (mb88xx.cpp:373), so consumers
+    // that latch the O port (e.g. namco_51xx's shared mailbox = MAME m_portO) must
+    // re-latch on every write, not on a value change. Purely additive: existing
+    // instantiations that leave it unconnected are unaffected.
     output reg         o_wr,
     input  wire        si_in,
     output reg         so_out,
@@ -56,13 +112,18 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
     reg [3:0]  ram [0:127];
     reg        retire, illegal;
     reg        in_irq, int_ack;
-    reg  [1:0] irq_stall;
+    reg  [1:0] irq_stall;                        // IRQ-ENTRY-STALL-2026-09-23
     reg        tc_in_d;       // TC pin level registered, for external-counter falling-edge detect
     reg [10:0] fetch_pc;
     reg [2:0]  pending_irq;    // {external, timer, serial} pending  (bit2/1/0)
     reg [5:0]  TP;             // timer prescaler (÷32)
-    // ---- SERIAL ; faithful to MAME mb88xx.cpp serial_timer()/pio_enable()) ----
-    // 4-bit receive shift at one bit per machine cycle when pio[5:4] == 2'b10; sets sf + serial IRQ after 4.
+    // ---- SERIAL (2026-07-18; faithful to MAME mb88xx.cpp serial_timer()/pio_enable()) ----
+    // 4-bit RECEIVE shift register clocked at clock()/SERIAL_PRESCALE(=6), armed when
+    // pio[5:4]==2'b10 (MAME's (m_pio & 0x30)==0x20 = internal serial clock). Each tick
+    // shifts SI into SB bit3; after 4 bits sets sf + serial IRQ (pending_irq[0], vec 0x06).
+    // sf blocks further shifting until tsts clears it; SBcount runaway-disables at THRESH
+    // (MAME anti-hang). External-clock serial (pio 0x10/0x30) is unsupported by MAME
+    // (fatalerror) so we just don't tick. SO/transmit is not modeled in MAME's mb88 either.
     reg [10:0] SBcount;        // serial tick counter (reaches SERIAL_DISABLE_THRESH)
     reg [2:0]  serial_ps;      // ÷6 serial prescaler (counts ce)
     reg        serial_disabled;// runaway guard tripped; re-armed by tsts
@@ -72,8 +133,13 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
     wire [5:0] hw_vec = active_irq[2] ? 6'h02 : active_irq[1] ? 6'h04 : 6'h06;
     wire serial_running = (pio[5:4]==2'b10) && !serial_disabled;   // internal serial enabled
 
-    localparam [1:0] S_FETCH=0, S_FETCH2=1, S_ILLEGAL=2;
-    reg [1:0] state;
+    // MB88-2026-10-24: S_IRQ1-3 from Arabian (IRQ-CYCLES-FIX-2026-08-21), only reached when IRQ_AFTER_INSN = 1.
+    // localparam [1:0] S_FETCH=0, S_FETCH2=1, S_ILLEGAL=2;
+    // reg [1:0] state;
+    localparam [2:0] S_FETCH=0, S_FETCH2=1, S_ILLEGAL=2, S_IRQ1=3, S_IRQ2=4, S_IRQ3=5;
+    reg [2:0] state;
+    wire irq_take  = (int_req || |active_irq) && !in_irq;
+    wire irq_after = (IRQ_AFTER_INSN != 0) && irq_take;   // MAME order: finish the instruction, then enter
     reg [7:0] op1;             // latched opcode for 2-byte insns
 
     // ---- combinational helpers ----
@@ -104,6 +170,7 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
     reg [7:0] sub8;            // 8-bit for subtract borrow (bit4 = borrow)
     reg [3:0] wr_val; reg [6:0] wr_addr; reg wr_en;
     integer i;
+    reg [6:0] clr_a = 7'd0;
 
     always @(posedge clk) begin
         if (!reset_n) begin
@@ -116,26 +183,43 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
             retire<=0; illegal<=0; state<=S_FETCH; op1<=0; irq_stall<=2'd0;
             in_irq<=0; int_ack<=0; fetch_pc<=0; pending_irq<=0; TP<=0; tc_in_d<=1'b1;
             SBcount<=11'd0; serial_ps<=3'd0; serial_disabled<=1'b0;
-            // SP[] and ram[] intentionally NOT reset (MAME device_reset doesn't
-            // clear data RAM/stack; ROM inits RAM; Verilator zero-inits arrays).
+            // SP[] and ram[] survive a soft reset (MAME device_reset doesn't clear them); ram_clr is the power-on
+            // clear MAME gets from a fresh machine, needed because the FPGA is not reprogrammed between games
+            if (ram_clr) begin
+                ram[clr_a]      <= 4'd0;
+                SP[clr_a[1:0]]  <= 16'd0;
+                clr_a           <= clr_a + 7'd1;
+            end
         end else begin
           // external IRQ pin (active-low): logical rising edge sets pending if enabled
           iflag <= ~irq_n;
           if (~irq_n && !iflag && pio[2]) pending_irq[2] <= 1'b1;
-          // external counter: TC falling edge ticks the timer when pio6 is set (MAME m_ctr; 51xx: vblank)
+          // TC-TIMER-FIX-2026-07-17: external-counter timer path. MAME mb88xx.cpp:
+          //   `if (m_ctr && !state && (m_pio & 0x40)) increment_timer();  m_ctr = state;`
+          // i.e. on a FALLING edge of the TC pin, if external-counter mode (pio bit6/0x40)
+          // is enabled, tick the SAME timer. This drives the 51xx's per-frame timer, which
+          // MAME clocks from screen vblank (namco51.cpp vblank() -> MB88XX_TC_LINE). `tc_in`
+          // is the TC pin LEVEL; register it here (every clk, ungated) to catch the edge.
           tc_in_d <= tc_in;
-          // timer: internal (ena_timer & pio7) or external TC (pio6) into one TL/TH counter
-          if ((ena_timer && pio[7]) || ((tc_in_d & ~tc_in) && pio[6])) begin  // pio7 internal / pio6 external
+          // timer: ena_timer is ALREADY ÷32-prescaled externally (Kangaroo mcu_tp),
+          // so increment TL directly -> TH cascade -> overflow -> timer IRQ pending. Two
+          // mutually-exclusive sources feed the ONE counter (a chip uses internal OR external
+          // mode, never both): internal clock (ena_timer & pio7 = MAME 0x80), OR external TC
+          // falling edge (pio6 = MAME 0x40).
+          if ((ena_timer && pio[7]) || ((tc_in_d & ~tc_in) && pio[6])) begin  // MCU-TIMER-FIX-2026-07-11: pio7 gate (MAME 0x80); TC-TIMER-FIX-2026-07-17: + external TC path (pio6/MAME 0x40)
             TL <= TL + 4'd1;
             if (TL == 4'hF) begin
               TH <= TH + 4'd1;
               if (TH == 4'hF) begin vf <= 1'b1; pending_irq[1] <= 1'b1; end
             end
           end
-          // ---- SERIAL receive (MAME serial_timer): placed before the instruction block so a coincident tsts wins ----
+          // ---- SERIAL receive engine (MAME serial_timer). ce-paced ÷6 prescaler. Placed
+          // BEFORE the instruction block so a coincident tsts (clears sf/SBcount) overrides. ----
           if (ce) begin
             if (serial_running) begin
-              // ce is already the machine-cycle rate: one serial shift per ce
+              // MAME SERIAL_PRESCALE=6 divides the MB88 PIN
+              // clock; `ce` is already pin/6 (MCU_CEN_DIV), so the /6 must not be
+              // applied twice. Serial shifts once per machine cycle.
               if (serial_ps == 3'd0) begin
                 serial_ps <= 3'd0;
                 SBcount   <= SBcount + 11'd1;
@@ -149,13 +233,15 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
           end
           if (ce) begin
             retire <= 1'b0; int_ack <= 1'b0;
-            o_wr <= 1'b0;
+            o_wr <= 1'b0;                       // O-PORT-STROBE-2026-08-09
             wr_en = 1'b0; wr_val = 4'h0; wr_addr = 7'h0;
-            if (irq_stall != 2'd0) irq_stall <= irq_stall - 2'd1;  // no fetch while entering an interrupt
+            if (irq_stall != 2'd0) irq_stall <= irq_stall - 2'd1;   // IRQ-ENTRY-STALL: no fetch while entering
             else
             case (state)
             // ==================================================================
-            S_FETCH: if ((int_req || |active_irq) && !in_irq) begin
+            // MB88-2026-10-24: at-fetch entry only when IRQ_AFTER_INSN = 0; original condition:
+            // S_FETCH: if ((int_req || |active_irq) && !in_irq) begin
+            S_FETCH: if ((IRQ_AFTER_INSN == 0) && irq_take) begin
                 // ---- take interrupt: push {flags,return PC}, vector to handler ----
                 // int_req = trace-injection (co-sim diff); active_irq = real HW path.
                 SP[SI] <= {cf, zf, st, 2'b00, PA, PC};   // return addr = deferred insn
@@ -163,14 +249,16 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
                 PA <= 5'd0; PC <= int_req ? int_vec : hw_vec;  // ext 0x02/timer 0x04/serial 0x06
                 in_irq <= 1'b1; st <= 1'b1; int_ack <= 1'b1;   // no retire (not an insn)
                 pending_irq <= 3'b000;                          // MAME clears all pending on take
-                irq_stall <= IRQ_ENTRY_STALL[1:0];
+                irq_stall <= IRQ_ENTRY_STALL[1:0];              // IRQ-ENTRY-STALL-2026-09-23
             end else begin
                 fetch_pc <= {PA,PC};     // executing instruction's own PC (matches MAME)
                 PC<=pc_n; PA<=pa_n;      // default INCPC (branches override below)
                 retire<=1'b1;
+                state <= irq_after ? S_IRQ1 : S_FETCH;   // MB88-2026-10-24 (Arabian); 2-byte ops override below
                 case (op)
                 8'h00: st<=1;                                   // nop
-                // outO: cf=1 -> oh, cf=0 -> ol; o_wr pulses unconditionally
+                // outO: cf=1->oh, cf=0->ol (MAME write_pla 8-bit / VHDL). o_wr pulses
+                // unconditionally here — see the O-PORT-STROBE note on the port decl.
                 8'h01: begin if (cf) o_out[7:4]<=A; else o_out[3:0]<=A; o_wr<=1'b1; st<=1; end
                 8'h02: begin p_out<=A; st<=1; end               // outP
                 8'h03: begin r_out[Y[1:0]*4 +: 4]<=A; st<=1; end// outR
@@ -208,7 +296,7 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
                 8'h23: begin cf<=0; st<=1; end                  // rstc
                 8'h24: st <= (r_in[{Y[3:2],2'b0} +: 4] & (4'd1<<Y[1:0])) ? 1'b0 : 1'b1; // tstr
                 8'h25: st <= ~iflag;                            // tsti
-                8'h26: begin st<=~vf; if (!timer_ovf_now) vf<=0; end  // tstv: no clear on a coincident overflow
+                8'h26: begin st<=~vf; if (!timer_ovf_now) vf<=0; end // tstv — MCU-TIMERVF-FIX-2026-07-11: skip clear on coincident overflow; was "vf<=0;" unconditional
                 8'h27: begin st<=~sf;                          // tsts: st=~sf; if(sf){re-arm+SBcount=0}; sf=0
                              if (sf) begin
                                if (SBcount >= SERIAL_THRESH) serial_disabled <= 1'b0;  // re-enable runaway-disabled serial
@@ -255,7 +343,9 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
             // ==================================================================
             S_FETCH2: begin
                 PC<=pc_n; PA<=pa_n;                 // consume operand byte
-                retire<=1'b1; state<=S_FETCH;
+                // MB88-2026-10-24: original below (IRQ_AFTER_INSN = 1 enters the interrupt after the operand, as Arabian)
+                // retire<=1'b1; state<=S_FETCH;
+                retire<=1'b1; state <= irq_after ? S_IRQ1 : S_FETCH;
                 case (op1)
                 8'h3d: begin PA<=op[4:0]; PC<={A,2'b00}; st<=1; end          // jpa: PA=imm, PC=A*4
                 8'h3e: begin pio<=pio | op; st<=1; end                        // en
@@ -276,6 +366,19 @@ module mb88_core #(parameter IRQ_ENTRY_STALL = 0)
                 default: ;
                 endcase
             end
+            // MB88-2026-10-24: from Arabian (IRQ-CYCLES-FIX-2026-08-21), IRQ_AFTER_INSN = 1 only.
+            // Entry work + 2 idle ce = 3 ce, so instruction + interrupt = 4 ce = MAME's 1 + burn_cycles(3).
+            // {PA,PC} here is already the POST-instruction PC = MAME's GETPC().
+            S_IRQ1: begin
+                SP[SI] <= {cf, zf, st, 2'b00, PA, PC};
+                SI <= SI + 2'd1;
+                PA <= 5'd0; PC <= int_req ? int_vec : hw_vec;  // ext 02 / timer 04 / serial 06
+                in_irq <= 1'b1; st <= 1'b1; int_ack <= 1'b1;
+                pending_irq <= 3'b000;
+                state <= S_IRQ2;
+            end
+            S_IRQ2: state <= S_IRQ3;
+            S_IRQ3: state <= S_FETCH;
             S_ILLEGAL: ;
             default: state<=S_FETCH;
             endcase

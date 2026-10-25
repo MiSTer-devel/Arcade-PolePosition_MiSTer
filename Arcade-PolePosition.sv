@@ -181,43 +181,64 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.joystick_1(joystick_1)
 );
 
-wire key_start1, key_start2;
-wire key_coin1, key_coin2, key_coin3, key_coin4;
-wire key_reset, key_service;
+wire pause_cpu;                     // CTL2-2026-10-25: declared here (was at the pause instance; the keyboard uses it)
 
-wire key_p1_up, key_p1_left, key_p1_down, key_p1_right, key_p1_fire, key_p1_bomb;
-wire key_p2_up, key_p2_left, key_p2_down, key_p2_right, key_p2_fire, key_p2_bomb;
+// CTL2-2026-10-25: v1 local keyboard commented out below (now controllers.sv ctl_keyboard)
+// wire key_start1, key_start2;
+// wire key_coin1, key_coin2, key_coin3, key_coin4;
+// wire key_reset, key_service;
+//
+// wire key_p1_up, key_p1_left, key_p1_down, key_p1_right, key_p1_fire, key_p1_bomb;
+// wire key_p2_up, key_p2_left, key_p2_down, key_p2_right, key_p2_fire, key_p2_bomb;
+//
+// wire pressed = ps2_key[9];
+// always @(posedge clk_sys) begin
+// 	reg old_state;
+//
+// 	old_state <= ps2_key[10];
+// 	if(old_state ^ ps2_key[10]) begin
+// 		casex(ps2_key[8:0])
+// 			'h016: key_start1   <= pressed; // 1
+// 			'h01e: key_start2   <= pressed; // 2
+// 			'h02E: key_coin1    <= pressed; // 5
+// 			'h036: key_coin2    <= pressed; // 6
+// 			'h004: key_reset    <= pressed; // F3
+// 			'h046: key_service  <= pressed; // 9
+//
+// 			'hX75: key_p1_up    <= pressed; // up
+// 			'hX6b: key_p1_left  <= pressed; // left
+// 			'hX72: key_p1_down  <= pressed; // down
+// 			'hX74: key_p1_right <= pressed; // right
+// 			'h014: key_p1_fire  <= pressed; // lctrl
+// 			'h011: key_p1_bomb  <= pressed; // lalt
+//
+// 			'h02d: key_p2_up    <= pressed; // r
+// 			'h023: key_p2_left  <= pressed; // d
+// 			'h02b: key_p2_down  <= pressed; // f
+// 			'h034: key_p2_right <= pressed; // g
+// 			'h01c: key_p2_fire  <= pressed; // a
+// 			'h01b: key_p2_bomb  <= pressed; // s
+// 		endcase
+// 	end
+// end
+// controllers.sv ctl_keyboard, STD_EXT 1 (the old casex: non-arrow keys only on their non-extended code, so right Ctrl /
+// Alt do nothing; arrows either). kb [0] up [1] down [2] left [3] right [4] lctrl [5] lalt [6] 1 [7] 2 [8] 5 [9] 6
+// [10] 9 ([11] T / [12] P unused); kbx [0] F3 reset, player 2 [1] R up [2] D left [3] F down [4] G right [5] A fire
+// [6] S bomb (player 2 keys unused by the board, as before)
+/* verilator lint_off UNUSED */
+wire [12:0] kb;
+wire  [6:0] kbx;
+/* verilator lint_on UNUSED */
+ctl_keyboard #(.STD_EXT(1), .NX(7), .NXO(7), .XKEYS({24'h11_1B_06, 24'h11_1C_05, 24'h11_34_04, 24'h11_2B_03,
+                                                     24'h11_23_02, 24'h11_2D_01, 24'h11_04_00})) u_kb
+(
+	.clk(clk_sys), .ps2_key(ps2_key), .pause(pause_cpu), .kb(kb), .kbx(kbx)
+);
+wire key_start1 = kb[6], key_start2 = kb[7];
+wire key_coin1 = kb[8], key_coin2 = kb[9];
+wire key_reset = kbx[0], key_service = kb[10];
+wire key_p1_up = kb[0], key_p1_left = kb[2], key_p1_down = kb[1], key_p1_right = kb[3], key_p1_fire = kb[4], key_p1_bomb = kb[5];
 
-wire pressed = ps2_key[9];
-always @(posedge clk_sys) begin
-	reg old_state;
-
-	old_state <= ps2_key[10];
-	if(old_state ^ ps2_key[10]) begin
-		casex(ps2_key[8:0])
-			'h016: key_start1   <= pressed; // 1
-			'h01e: key_start2   <= pressed; // 2
-			'h02E: key_coin1    <= pressed; // 5
-			'h036: key_coin2    <= pressed; // 6
-			'h004: key_reset    <= pressed; // F3
-			'h046: key_service  <= pressed; // 9
-
-			'hX75: key_p1_up    <= pressed; // up
-			'hX6b: key_p1_left  <= pressed; // left
-			'hX72: key_p1_down  <= pressed; // down
-			'hX74: key_p1_right <= pressed; // right
-			'h014: key_p1_fire  <= pressed; // lctrl
-			'h011: key_p1_bomb  <= pressed; // lalt
-
-			'h02d: key_p2_up    <= pressed; // r
-			'h023: key_p2_left  <= pressed; // d
-			'h02b: key_p2_down  <= pressed; // f
-			'h034: key_p2_right <= pressed; // g
-			'h01c: key_p2_fire  <= pressed; // a
-			'h01b: key_p2_bomb  <= pressed; // s
-		endcase
-	end
-end
 
 wire m_right1 = joystick_0[0]  | key_p1_right;
 wire m_left1  = joystick_0[1]  | key_p1_left;
@@ -225,12 +246,18 @@ wire m_down1  = joystick_0[2]  | key_p1_down;
 wire m_up1    = joystick_0[3]  | key_p1_up;
 // gear shifter is a latching toggle (MAME PORT_TOGGLE); powers up in Lo
 wire m_gear_btn = joystick_0[6] | key_p1_fire | key_p1_bomb;
-reg  m_gear_btn_d = 1'b0;
-reg  m_gear1      = 1'b0;
-always @(posedge clk_sys) begin
-	m_gear_btn_d <= m_gear_btn;
-	if (m_gear_btn & ~m_gear_btn_d) m_gear1 <= ~m_gear1;   // flip on press (rising edge)
-end
+// CTL-2026-10-24: original block commented out below (replaced by rtl/mister_custom/controllers.sv modules after it)
+// reg  m_gear_btn_d = 1'b0;
+// reg  m_gear1      = 1'b0;
+// always @(posedge clk_sys) begin
+// 	m_gear_btn_d <= m_gear_btn;
+// 	if (m_gear_btn & ~m_gear_btn_d) m_gear1 <= ~m_gear1;   // flip on press (rising edge)
+// end
+// CTL-2026-10-24: gear PORT_TOGGLE via ctl_toggle (flips on each press, powers up in Lo)
+wire m_gear1;
+// CTL2-2026-10-25: original below (presses while paused are ignored)
+// ctl_toggle u_gear(.clk(clk_sys), .clear(1'b0), .btn(m_gear_btn), .q(m_gear1));
+ctl_toggle u_gear(.clk(clk_sys), .clear(1'b0), .btn(m_gear_btn), .pause(pause_cpu), .q(m_gear1));
 // Service Mode (self-test switch, IN0 bit 7): button or OSD toggle
 wire m_service_mode = joystick_0[7];
 wire m_coin1  = joystick_0[8]  | key_coin1;
@@ -242,7 +269,8 @@ wire m_pause  = joystick_0[11];
 wire m_coin2  = joystick_1[8]  | key_coin2;
 
 // PAUSE SYSTEM
-wire				pause_cpu;
+// CTL2-2026-10-25: original below (pause_cpu is now declared above the keyboard block)
+// wire				pause_cpu;
 pause #(4,4,4,12) pause (
 	.*,
 	.user_button(m_pause),
@@ -404,19 +432,51 @@ always @(posedge clk_sys) begin
 	engine_data <= engine_rom[engine_addr];
 end
 
-// steering: spinner / mouse / analog wheel / paddle / D-pad
+// CTL-2026-10-24: original block commented out below (replaced by rtl/mister_custom/controllers.sv modules after it)
+// // steering: spinner / mouse / analog wheel / paddle / D-pad
+// wire [7:0] steer_pos;
+// pp_steering pp_steering
+// (
+// 	.clk         (clk_sys),
+// 	.reset       (reset),
+// 	.mode        (status[18:17]),
+// 	.sensitivity (status[16:14]),
+// 	.reverse     (status[13]),
+// 	.left        (m_left1),
+// 	.right       (m_right1),
+// 	.spinner     (spinner_0),
+// 	.mouse       (ps2_mouse),
+// 	.analog_x    (joystick_l_analog_0[7:0]),
+// 	.paddle      (paddle_0),
+// 	.steer_pos   (steer_pos)
+// );
+// CTL-2026-10-24: steering via ctl_mouse + ctl_steer (pp_steering's logic: spinner / mouse X relative, stick / paddle
+// absolute by status[18:17], D-pad ramp, one count per clk/16384 tick). steer_pos powers up 0x80 (was 0); reset sets 0x80.
+wire       steer_mouse_ev;
+wire [9:0] steer_mouse_dx;
+/* verilator lint_off UNUSED */
+wire [9:0] steer_mouse_dy;
+wire [2:0] steer_mouse_btn;
+/* verilator lint_on UNUSED */
+ctl_mouse u_mouse(.clk(clk_sys), .ps2_mouse(ps2_mouse), .ev(steer_mouse_ev), .dx(steer_mouse_dx), .dy(steer_mouse_dy),
+                  .btn(steer_mouse_btn));
 wire [7:0] steer_pos;
-pp_steering pp_steering
+ctl_steer u_steer
 (
 	.clk         (clk_sys),
 	.reset       (reset),
+	// CTL2-2026-10-25: original below
+// 	.pause       (1'b0),
+// 	.mode        (status[18:17]),
+	.pause       (pause_cpu),
 	.mode        (status[18:17]),
 	.sensitivity (status[16:14]),
 	.reverse     (status[13]),
 	.left        (m_left1),
 	.right       (m_right1),
 	.spinner     (spinner_0),
-	.mouse       (ps2_mouse),
+	.mouse_ev    (steer_mouse_ev),
+	.mouse_dx    (steer_mouse_dx),
 	.analog_x    (joystick_l_analog_0[7:0]),
 	.paddle      (paddle_0),
 	.steer_pos   (steer_pos)
@@ -427,24 +487,40 @@ wire       pedal_analog = status[9];
 wire       m_accel1 = (pedal_analog ? 1'b0 : m_up1)   | joystick_0[4];
 wire       m_brake1 = (pedal_analog ? 1'b0 : m_down1) | joystick_0[5];
 wire [7:0] pedal_y_raw  = status[21] ? joystick_r_analog_0[15:8] : joystick_l_analog_0[15:8];
-wire signed [8:0] pedal_y = $signed({pedal_y_raw[7], pedal_y_raw});
-wire [7:0] pedal_mag    = pedal_y[8] ? (8'd0 - pedal_y_raw) : pedal_y_raw;     // |Y|, -128 -> 128 wraps to 0x80
-wire [15:0] pedal_scl   = {8'd0, pedal_mag} * 16'd144;                       // x 0x90 / 128
-wire [7:0] pedal_lvl    = (pedal_mag < 8'd8) ? 8'h00 : pedal_scl[14:7];       // dead zone ~6%
-wire [7:0] ana_accel    = (pedal_analog && pedal_y[8])  ? pedal_lvl : 8'h00;  // up (negative Y)
-wire [7:0] ana_brake    = (pedal_analog && !pedal_y[8]) ? pedal_lvl : 8'h00;  // down
-// digital pedals ramp +16/frame like MAME's keyboard pedal: the PP2 bootlegs only start while gas reads $40-$7F
-reg  [7:0] dig_accel = 8'h00, dig_brake = 8'h00;
-reg        pedal_vb_d;
-always @(posedge clk_sys) begin
-	pedal_vb_d <= vblank;
-	if (vblank & ~pedal_vb_d) begin
-		dig_accel <= !m_accel1 ? 8'h00 : (dig_accel >= 8'h80) ? 8'h90 : dig_accel + 8'd16;
-		dig_brake <= !m_brake1 ? 8'h00 : (dig_brake >= 8'h80) ? 8'h90 : dig_brake + 8'd16;
-	end
-end
-wire [7:0] pp_accel = m_accel1 ? dig_accel : ana_accel;
-wire [7:0] pp_brake = m_brake1 ? dig_brake : ana_brake;
+// CTL-2026-10-24: original block commented out below (replaced by rtl/mister_custom/controllers.sv modules after it)
+// wire signed [8:0] pedal_y = $signed({pedal_y_raw[7], pedal_y_raw});
+// wire [7:0] pedal_mag    = pedal_y[8] ? (8'd0 - pedal_y_raw) : pedal_y_raw;     // |Y|, -128 -> 128 wraps to 0x80
+// wire [15:0] pedal_scl   = {8'd0, pedal_mag} * 16'd144;                       // x 0x90 / 128
+// wire [7:0] pedal_lvl    = (pedal_mag < 8'd8) ? 8'h00 : pedal_scl[14:7];       // dead zone ~6%
+// wire [7:0] ana_accel    = (pedal_analog && pedal_y[8])  ? pedal_lvl : 8'h00;  // up (negative Y)
+// wire [7:0] ana_brake    = (pedal_analog && !pedal_y[8]) ? pedal_lvl : 8'h00;  // down
+// // digital pedals ramp +16/frame like MAME's keyboard pedal: the PP2 bootlegs only start while gas reads $40-$7F
+// reg  [7:0] dig_accel = 8'h00, dig_brake = 8'h00;
+// reg        pedal_vb_d;
+// always @(posedge clk_sys) begin
+// 	pedal_vb_d <= vblank;
+// 	if (vblank & ~pedal_vb_d) begin
+// 		dig_accel <= !m_accel1 ? 8'h00 : (dig_accel >= 8'h80) ? 8'h90 : dig_accel + 8'd16;
+// 		dig_brake <= !m_brake1 ? 8'h00 : (dig_brake >= 8'h80) ? 8'h90 : dig_brake + 8'd16;
+// 	end
+// end
+// wire [7:0] pp_accel = m_accel1 ? dig_accel : ana_accel;
+// wire [7:0] pp_brake = m_brake1 ? dig_brake : ana_brake;
+// CTL-2026-10-24: pedal levels via ctl_tick (vblank) + ctl_pedal (+16 per frame to 0x90; analog |Y| x 0x90/128, dead zone 8)
+wire pedal_tick;
+// CTL2-2026-10-25: original below (pedal tick and ramps stop while paused; PAUSE_MODE 1: a release while paused clears)
+// ctl_tick #(.MODE(0)) u_pedal_tick(.clk(clk_sys), .pause(1'b0), .vblank(vblank), .period(18'd0), .tick(pedal_tick));
+// wire [7:0] pp_accel, pp_brake;
+// ctl_pedal #(.FULL(8'h90), .RAMP(8'd16), .DZ(8'd8)) u_pedal
+// (
+// 	.clk(clk_sys), .pause(1'b0), .tick(pedal_tick), .accel_btn(m_accel1), .brake_btn(m_brake1),
+ctl_tick #(.MODE(0)) u_pedal_tick(.clk(clk_sys), .pause(pause_cpu), .vblank(vblank), .period(18'd0), .tick(pedal_tick));
+wire [7:0] pp_accel, pp_brake;
+ctl_pedal #(.FULL(8'h90), .RAMP(8'd16), .DZ(8'd8), .PAUSE_MODE(1)) u_pedal
+(
+	.clk(clk_sys), .pause(pause_cpu), .tick(pedal_tick), .accel_btn(m_accel1), .brake_btn(m_brake1),
+	.analog_en(pedal_analog), .axis(pedal_y_raw), .accel(pp_accel), .brake(pp_brake)
+);
 
 poleposition poleposition
 (

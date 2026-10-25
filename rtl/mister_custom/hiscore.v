@@ -289,27 +289,39 @@ enddata_table(
 	.q_b(end_val)
 );
 
-// RAM chunk used to store valid hiscore data 
-// HISCORE-BRAM-2026-09-20: was dpram_hs. That template guards the registered read
-// with the write-enable AND has both ports in ONE always block, so Quartus cannot map
-// it to an M10K once both ports write -- it synthesises to flops + a 2**aWidth:1 mux.
-// Harmless at the stock aWidth=8 (256 B), FATAL at aWidth=11 (2048 B): the two big
-// RAMs alone took the fitter to 6292 LABs on a 4191-LAB device. dpram_dc is a direct
-// altsyncram instantiation (no inference to fail) and is already in files.qip.
-// See Common-Pitfalls/"dpram template blocks dual-port BRAM inference".
-// Latency/behaviour match: dpram_hs = combinational addr + registered q = 1 cycle;
-// dpram_dc = registered addr (CLOCK0/1) + UNREGISTERED outdata = 1 cycle, and its
-// read_during_write NEW_DATA matches dpram_hs's q<=d write-through.
-// Original:
-//   dpram_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
-//   hiscore_data ( .clk(clk), .addr_a(...), .we_a(...), .d_a(...),
-//                  .addr_b(...), .we_b(...), .d_b(...), .q_b(...) );
-dpram_dc #(.widthad_a(HS_SCOREWIDTH),.width_a(8))
+// HS-RAM-REVERT-2026-10-23: original dpram_hs instances commented out below, uncomment to restore
+// (Quartus built both from ~4k registers, ~3.3k ALMs, never M10K; the write-through q is never consumed)
+// // RAM chunk used to store valid hiscore data
+// dpram_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
+// hiscore_data (
+// 	.clk(clk),
+// 	.addr_a(ioctl_addr[(HS_SCOREWIDTH-1):0]),
+// 	.we_a(downloading_dump),
+// 	.d_a(data_from_hps),
+// 	.addr_b(data_addr),
+// 	.we_b(dump_write),
+// 	.d_b(hiscore_buffer_out),
+// 	.q_b(hiscore_data_out)
+// );
+// // RAM chunk used to store temporary high score data
+// dpram_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
+// hiscore_buffer (
+// 	.clk(clk),
+// 	.addr_a(buffer_addr),
+// 	.we_a(buffer_write),
+// 	.d_a(data_from_ram),
+// 	.q_a(hiscore_buffer_out)
+// );
+
+// HS-RAM-2026-10-23: same RAMs as explicit altsyncram (dpram_dc), 1-clock read latency as before
+// RAM chunk used to store valid hiscore data
+dpram_dc #(.widthad_a(HS_SCOREWIDTH), .width_a(8))
 hiscore_data (
 	.clock_a(clk),
 	.address_a(ioctl_addr[(HS_SCOREWIDTH-1):0]),
 	.wren_a(downloading_dump),
 	.data_a(data_from_hps),
+	.q_a(),
 	.clock_b(clk),
 	.address_b(data_addr),
 	.wren_b(dump_write),
@@ -317,20 +329,18 @@ hiscore_data (
 	.q_b(hiscore_data_out)
 );
 // RAM chunk used to store temporary high score data
-// HISCORE-BRAM-2026-09-20: same swap as hiscore_data above. clock_b MUST be tied
-// even though port B is unused -- dpram_dc's clock_b has no VHDL default (the other
-// port-B inputs do). Original:
-//   dpram_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
-//   hiscore_buffer ( .clk(clk), .addr_a(buffer_addr), .we_a(buffer_write),
-//                    .d_a(data_from_ram), .q_a(hiscore_buffer_out) );
-dpram_dc #(.widthad_a(HS_SCOREWIDTH),.width_a(8))
+dpram_dc #(.widthad_a(HS_SCOREWIDTH), .width_a(8))
 hiscore_buffer (
 	.clock_a(clk),
 	.address_a(buffer_addr),
 	.wren_a(buffer_write),
 	.data_a(data_from_ram),
 	.q_a(hiscore_buffer_out),
-	.clock_b(clk)
+	.clock_b(clk),
+	.address_b({HS_SCOREWIDTH{1'b0}}),
+	.wren_b(1'b0),
+	.data_b(8'd0),
+	.q_b()
 );
 
 assign data_to_ram = hiscore_data_out;

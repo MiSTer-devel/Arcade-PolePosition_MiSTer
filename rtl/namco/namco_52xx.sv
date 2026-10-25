@@ -74,6 +74,7 @@ module namco_52xx
         .clock      (clk),
         .ena        (ena),
         .reset_n    (reset_n),
+        .ram_clr    (1'b0),        // MB88-2026-10-24: fleet mb88 power-on RAM clear, unused here
 
         .r0_port_in (r0_in), .r1_port_in (r1_in), .r2_port_in (4'h0), .r3_port_in (4'h0),
         .r0_port_out(r0_out_unused), .r1_port_out(r1_out_unused),
