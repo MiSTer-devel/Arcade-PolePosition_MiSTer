@@ -461,7 +461,10 @@ wire [2:0] steer_mouse_btn;
 ctl_mouse u_mouse(.clk(clk_sys), .ps2_mouse(ps2_mouse), .ev(steer_mouse_ev), .dx(steer_mouse_dx), .dy(steer_mouse_dy),
                   .btn(steer_mouse_btn));
 wire [7:0] steer_pos;
-ctl_steer u_steer
+// CTL4-2026-10-27: original below. RATE: Steering = Analog stick/wheel turns at a speed set by the deflection (MAME feeds
+// a stick to the IPT_DIAL that way); before, a held stick moved the dial <= 64 counts once and the car went straight.
+// ctl_steer u_steer
+ctl_steer #(.RATE(1'b1)) u_steer
 (
 	.clk         (clk_sys),
 	.reset       (reset),
